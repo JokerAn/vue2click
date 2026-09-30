@@ -1,0 +1,34 @@
+{
+  "name": "vueClick",
+  "displayName": "vueClick",
+  "description": "vue点击变量或函数名称，快速跳转到定义的位置",
+  "icon": "icon.png",
+  "version": "0.1.0",
+  "publisher": "jokeran",
+  "author": "jokeran",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:vue",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "esbuild src/extension.js --bundle --platform=node --target=node18 --external:vscode --minify --outfile=dist/extension.js",
+    "package": "npm run test && npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "typescript": "~5.9.0"
+  }
+}

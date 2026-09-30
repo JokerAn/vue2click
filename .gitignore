@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.vsix
+.joycode
+.vscode
+.agent
+.DS_Store
