@@ -5,3 +5,6 @@ dist/
 .vscode
 .agent
 .DS_Store
+.vsce_pat
+.agent
+.agent-teams

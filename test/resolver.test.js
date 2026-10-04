@@ -86,17 +86,22 @@ test('unicode does not shift Vue script offsets', () => {
   assert.equal(findDefinition(buildIndex(src, 'vue'), src.lastIndexOf('foo') + 1).start, src.indexOf('foo'))
 })
 
-test('real project regression: this.createdInit resolves to method at line 2202 when fixture exists', t => {
+test('real project regression: this.createdInit resolves to method when fixture exists', t => {
   const file = '/Users/anshunli1/jd/jdGit/product/web/apply-claim/src/views/apply/index.vue'
   if (!fs.existsSync(file)) return t.skip('original Vue 2 project is not available')
   const src = fs.readFileSync(file, 'utf8')
   const index = buildIndex(src, 'vue', file)
-  const start = src.indexOf('return this.createdInit(reasonVerification)')
-  assert.ok(start >= 0)
+  const call = 'return this.createdInit('
+  const start = src.indexOf(call)
+  assert.ok(start >= 0, `missing call: ${call}`)
   const hit = findDefinition(index, start + 'return this.created'.length)
   assert.ok(hit, 'Vetur returned [] for this case')
   assert.equal(src.slice(hit.start, hit.end), 'createdInit')
-  assert.equal(src.slice(0, hit.start).split('\n').length, 2202)
+  assert.equal(
+    src.slice(0, hit.start).split('\n').length,
+    src.slice(0, src.indexOf('async createdInit(')).split('\n').length,
+    'must point at the createdInit declaration'
+  )
   assert.equal(check(src, "this.failEntryInitF('原因配置加载失败，请重试')", 'failEntryInitF', 'vue'), 'failEntryInitF')
 })
 
@@ -127,7 +132,11 @@ test('real project regression: getAiShareInfo in watch handler resolves to metho
     const hit = findDefinition(index, at + 'this.'.length + 2)
     assert.ok(hit, `missing definition for ${call}`)
     assert.equal(src.slice(hit.start, hit.end), 'getAiShareInfo', call)
-    assert.equal(src.slice(0, hit.start).split('\n').length, 3002, call)
+    assert.equal(
+      src.slice(0, hit.start).split('\n').length,
+      src.slice(0, src.indexOf('getAiShareInfo(retryCount = 0)')).split('\n').length,
+      call
+    )
   }
 })
 
@@ -174,4 +183,70 @@ test('Vue data takes precedence over an identically named watch handler', () => 
   const src = 'export default { data() { return { status: 1 } }, watch: { status() {} }, methods: { run() { return this.status } } }'
   const hit = findDefinition(buildIndex(src, 'javascript'), src.indexOf('this.status') + 'this.'.length)
   assert.equal(hit?.start, src.indexOf('status: 1'))
+})
+
+test('a let/const this alias resolves instance members exactly like this', () => {
+  const src = `export default {
+  methods: {
+    goBackPop() {},
+    appBack() {},
+    mounted() {
+      const me = this
+      const params = {
+        onClickBtnBack: (res) => {
+          if (window.location.href.includes('claim/apply-claim/process')) {
+            me.goBackPop()
+          } else {
+            me.appBack()
+          }
+        }
+      }
+      return params
+    }
+  }
+}`
+  const index = buildIndex(src, 'javascript')
+  const pop = findDefinition(index, src.indexOf('me.goBackPop()') + 'me.'.length + 1)
+  assert.equal(src.slice(pop.start, pop.end), 'goBackPop')
+  const back = findDefinition(index, src.indexOf('me.appBack()') + 'me.'.length + 1)
+  assert.equal(src.slice(back.start, back.end), 'appBack')
+
+  // Clicking the alias itself still points at its declaration.
+  const alias = findDefinition(index, src.indexOf('me.goBackPop()') + 1)
+  assert.equal(src.slice(alias.start, alias.end), 'me')
+  assert.equal(alias.start, src.indexOf('me = this'))
+})
+
+test('this aliases respect scope and shadowing, and never bind other receivers', () => {
+  const leak = 'export default { methods: { load() {}, a() { const me = this; me.load() }, b() { me.load() } } }'
+  assert.equal(findDefinition(buildIndex(leak, 'javascript'), leak.lastIndexOf('me.load()') + 3), null)
+
+  const shadow = 'export default { methods: { load() {}, run() { const me = this; { const me = {}; me.load() } } } }'
+  assert.equal(findDefinition(buildIndex(shadow, 'javascript'), shadow.lastIndexOf('me.load()') + 3), null)
+
+  const plain = 'const me = { load() {} }; me.load()'
+  assert.equal(findDefinition(buildIndex(plain, 'javascript'), plain.lastIndexOf('me.load()') + 3), null)
+
+  const self = 'export default { methods: { load() {}, run() { const self = this; self.load() } } }'
+  const hit = findDefinition(buildIndex(self, 'javascript'), self.indexOf('self.load()') + 'self.'.length + 1)
+  assert.equal(self.slice(hit.start, hit.end), 'load')
+
+  const casted = 'export default { methods: { load() {}, run() { const me = this as any; me.load() } } }'
+  const castHit = findDefinition(buildIndex(casted, 'typescript'), casted.indexOf('me.load()') + 'me.'.length + 1)
+  assert.equal(casted.slice(castHit.start, castHit.end), 'load')
+})
+
+test('real project regression: let me = this alias resolves in ai-process', t => {
+  const file = '/Users/anshunli1/jd/jdGit/product/web/apply-claim/src/views/ai-code/ai-process/index.vue'
+  if (!fs.existsSync(file)) return t.skip('original Vue 2 project is not available')
+  const src = fs.readFileSync(file, 'utf8')
+  const index = buildIndex(src, 'vue', file)
+  const at = src.indexOf('me.goBackPop()')
+  assert.ok(at >= 0, 'missing me.goBackPop() call')
+  const hit = findDefinition(index, at + 'me.'.length + 1)
+  assert.ok(hit, 'let me = this receiver was not resolved')
+  assert.equal(src.slice(hit.start, hit.end), 'goBackPop')
+  assert.equal(src.slice(0, hit.start).split('\n').length, 589)
+  const back = findDefinition(index, src.indexOf('me.appBack()') + 'me.'.length + 1)
+  assert.equal(src.slice(back.start, back.end), 'appBack')
 })

@@ -3,10 +3,14 @@
   "displayName": "vueClick",
   "description": "vue点击变量或函数名称，快速跳转到定义的位置",
   "icon": "icon.png",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JokerAn/vue2click.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -24,7 +28,9 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "build": "esbuild src/extension.js --bundle --platform=node --target=node18 --external:vscode --minify --outfile=dist/extension.js",
-    "package": "npm run test && npm run build && vsce package --no-dependencies"
+    "package": "npm run test && npm run build && vsce package --no-dependencies",
+    "release": "npm run test && npm run build && vsce publish --no-dependencies",
+    "publish:vsix": "vsce publish --no-dependencies --packagePath"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.6.0",

@@ -31,9 +31,10 @@ function buildIndex(text, language, fileName = 'untitled.js') {
   const bindings = []
   const options = []
   const thisAssignments = []
-  const pushBinding = (name, scope) => {
-    if (ts.isIdentifier(name)) bindings.push({ name: name.text, node: name, scope })
+  const pushBinding = (name, scope, isThisAlias = false) => {
+    if (ts.isIdentifier(name)) bindings.push({ name: name.text, node: name, scope, isThisAlias })
     else if (name && (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name))) {
+      // A destructured pattern never aliases the whole `this` instance.
       for (const element of name.elements) if (ts.isBindingElement(element)) pushBinding(element.name, scope)
     }
   }
@@ -49,7 +50,7 @@ function buildIndex(text, language, fileName = 'untitled.js') {
     if (ts.isVariableDeclaration(node)) {
       const list = node.parent
       const blockScoped = (list.flags & ts.NodeFlags.BlockScoped) !== 0
-      pushBinding(node.name, enclosingScope(node, !blockScoped))
+      pushBinding(node.name, enclosingScope(node, !blockScoped), isThisValue(node.initializer))
     } else if (ts.isParameter(node)) pushBinding(node.name, enclosingFunction(node))
     else if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node) || ts.isEnumDeclaration(node)) {
       if (node.name) pushBinding(node.name, enclosingScope(node))
@@ -66,6 +67,15 @@ function asObject(expr) {
   if (ts.isObjectLiteralExpression(expr)) return expr
   if (ts.isCallExpression(expr) && expr.arguments.length) return asObject(expr.arguments[0])
   return null
+}
+
+// `const me = this` / `let self = this` make the variable behave like `this`,
+// so `me.createdInit()` must resolve like `this.createdInit()`.
+function isThisValue(expr) {
+  if (!expr) return false
+  while (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) ||
+    ts.isSatisfiesExpression(expr) || ts.isNonNullExpression(expr)) expr = expr.expression
+  return expr.kind === ts.SyntaxKind.ThisKeyword
 }
 
 function enclosingFunction(node) {
@@ -212,18 +222,30 @@ function findDefinition(index, offset) {
   const parent = id.parent
   let target
   if (ts.isPropertyAccessExpression(parent) && parent.name === id) {
-    if (parent.expression.kind !== ts.SyntaxKind.ThisKeyword) return null
+    if (!isInstanceReceiver(index, parent.expression, offset)) return null
     target = memberOfThis(index, id)
   } else if ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent) || ts.isMethodSignature(parent)) && parent.name === id) {
     return null // Do not turn object keys into unqualified variables.
   } else {
-    const candidates = index.bindings.filter(b => b.name === id.text && isAncestor(b.scope, id))
-    candidates.sort((a, b) => depth(b.scope) - depth(a.scope) ||
-      (a.node.getStart(index.root) <= offset ? -1 : 1) - (b.node.getStart(index.root) <= offset ? -1 : 1))
-    target = candidates[0]?.node
+    target = resolveBinding(index, id, offset)?.node
   }
   if (!target) return null
   return { start: target.getStart(index.root), end: target.end }
+}
+
+// The receiver of `this.foo` is the instance; a variable declared from `this`
+// (let me = this) is the same instance, as long as that binding is in scope.
+function isInstanceReceiver(index, receiver, offset) {
+  if (receiver.kind === ts.SyntaxKind.ThisKeyword) return true
+  if (!ts.isIdentifier(receiver)) return false
+  return Boolean(resolveBinding(index, receiver, offset)?.isThisAlias)
+}
+
+function resolveBinding(index, id, offset) {
+  const candidates = index.bindings.filter(b => b.name === id.text && isAncestor(b.scope, id))
+  candidates.sort((a, b) => depth(b.scope) - depth(a.scope) ||
+    (a.node.getStart(index.root) <= offset ? -1 : 1) - (b.node.getStart(index.root) <= offset ? -1 : 1))
+  return candidates[0]
 }
 
 function isAncestor(ancestor, node) {
