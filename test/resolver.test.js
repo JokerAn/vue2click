@@ -33,8 +33,142 @@ test('Vue 2 methods, data and computed properties resolve at exact source offset
   assert.equal(check(component, 'this.createdInit(this.value)', 'value', 'vue'), 'value')
   assert.equal(check(component, 'this.computedValue + globalValue', 'computedValue', 'vue'), 'computedValue')
   assert.equal(check(component, '+ globalValue', 'globalValue', 'vue'), 'globalValue')
-  assert.equal(findDefinition(buildIndex(component, 'vue'), component.indexOf('{{ value }}') + 3), null)
+  assert.equal(findDefinition(buildIndex(component, 'vue'), component.indexOf('{{ value }}') + 3)?.start, component.indexOf('value: 1'))
   assert.equal(sourceText(component, 'vue').length, component.length)
+})
+
+test('Vue template events, bindings and interpolations resolve component declarations at exact offsets', () => {
+  const src = `<template>
+  <!-- 🧩 Keep Unicode and multiline offsets intact. -->
+  <div v-if="isFoodSafeInsurance && ziyuanImgList.length">
+    <img :src="advertisementPNG" @click="gotoPage(1)" />
+    <button
+      @click.stop.prevent="
+        gotoPage(2)
+      "
+      v-bind:title="computedTitle"
+    >{{ heading }}</button>
+  </div>
+</template>
+<script>
+export default {
+  props: { heading: String },
+  data() { return { isFoodSafeInsurance: true, ziyuanImgList: [], advertisementPNG: '' } },
+  computed: { computedTitle() { return this.heading } },
+  methods: { gotoPage(type) {} }
+}
+</script>`
+  const index = buildIndex(src, 'vue')
+  for (const [reference, name, declaration] of [
+    ['gotoPage(1)', 'gotoPage', 'gotoPage(type)'],
+    ['gotoPage(2)', 'gotoPage', 'gotoPage(type)'],
+    ['isFoodSafeInsurance &&', 'isFoodSafeInsurance', 'isFoodSafeInsurance: true'],
+    ['ziyuanImgList.length', 'ziyuanImgList', 'ziyuanImgList: []'],
+    [':src="advertisementPNG"', 'advertisementPNG', "advertisementPNG: ''"],
+    ['v-bind:title="computedTitle"', 'computedTitle', 'computedTitle()'],
+    ['{{ heading }}', 'heading', 'heading: String']
+  ]) {
+    const offset = src.indexOf(reference) + reference.indexOf(name) + 1
+    const hit = findDefinition(index, offset)
+    assert.equal(hit?.start, src.indexOf(declaration), reference)
+    assert.equal(src.slice(hit.start, hit.end), name, reference)
+  }
+})
+
+test('Vue template local aliases and arrow parameters never jump to same-named component fields', () => {
+  const src = `<template>
+  <div v-for="(item, index) in items" :key="index" @click="gotoPage(item)">
+    {{ item }} {{ index }}
+  </div>
+  <section slot-scope="item">{{ item }}</section>
+  <widget v-slot="{ item }">{{ item }}</widget>
+  <button @click="items.map(item => gotoPage(item))" />
+  <p>{{ item }}</p>
+</template>
+<script>
+export default {
+  data() { return { item: 'component', index: 0, items: [] } },
+  methods: { gotoPage(type) {} }
+}
+</script>`
+  const index = buildIndex(src, 'vue')
+  const templateEnd = src.indexOf('</template>')
+  const outside = src.indexOf('<p>{{ item }}') + '<p>{{ '.length
+  for (const match of src.slice(0, templateEnd).matchAll(/\b(item|index)\b/g)) {
+    if (match.index === outside) continue
+    const hit = findDefinition(index, match.index + 1)
+    assert.notEqual(hit?.start, src.indexOf(match[1] + ':'), `local ${match[1]} at ${match.index}`)
+  }
+  assert.equal(findDefinition(index, outside + 1)?.start, src.indexOf("item: 'component'"))
+  assert.equal(findDefinition(index, src.indexOf('in items') + 'in '.length + 1)?.start, src.indexOf('items: []'))
+  assert.equal(findDefinition(index, src.indexOf('gotoPage(item)') + 1)?.start, src.indexOf('gotoPage(type)'))
+})
+
+test('Vue template text, strings, attributes, comments and ordinary object keys do not resolve as component fields', () => {
+  const src = `<template>
+  <!-- gotoPage -->
+  <div title="gotoPage" data-value="value">gotoPage
+    {{ 'gotoPage' }}
+    {{ value.gotoPage }}
+    {{ ({ gotoPage: value }) }}
+    <button @click="gotoPage('gotoPage')" />
+  </div>
+</template>
+<script>
+export default { data() { return { value: {} } }, methods: { gotoPage(type) {} } }
+</script>`
+  const index = buildIndex(src, 'vue')
+  for (const [reference, name] of [
+    ['<!-- gotoPage -->', 'gotoPage'],
+    ['title="gotoPage"', 'gotoPage'],
+    ['data-value="value"', 'value'],
+    ['>gotoPage\n', 'gotoPage'],
+    ["{{ 'gotoPage' }}", 'gotoPage'],
+    ['value.gotoPage', 'gotoPage'],
+    ['({ gotoPage: value })', 'gotoPage'],
+    ["('gotoPage')", 'gotoPage']
+  ]) {
+    assert.equal(findDefinition(index, src.indexOf(reference) + reference.indexOf(name) + 1), null, reference)
+  }
+  assert.equal(findDefinition(index, src.indexOf("gotoPage('gotoPage')") + 1)?.start, src.indexOf('gotoPage(type)'))
+  assert.equal(findDefinition(index, src.indexOf('gotoPage: value') + 'gotoPage: '.length + 1)?.start, src.indexOf('value: {}'))
+})
+
+test('real project regression: every template gotoPage click resolves to process method when fixture exists', t => {
+  const file = '/Users/anshunli1/jd/jdGit/product/web/apply-claim/src/views/process/index.vue'
+  if (!fs.existsSync(file)) return t.skip('original Vue 2 project is not available')
+  const src = fs.readFileSync(file, 'utf8')
+  const index = buildIndex(src, 'vue', file)
+  const clicks = [...src.slice(0, src.indexOf('</template>')).matchAll(/@click\s*=\s*"\s*(gotoPage)\([^"\n]*\)\s*"/g)]
+  assert.ok(clicks.length > 0, 'expected at least one template gotoPage click')
+  const declaration = /^\s*gotoPage\s*\(/m.exec(sourceText(src, 'vue'))
+  assert.ok(declaration, 'expected a gotoPage method declaration')
+  const target = declaration.index + declaration[0].indexOf('gotoPage')
+  for (const match of clicks) {
+    const hit = findDefinition(index, match.index + match[0].indexOf('gotoPage') + 1)
+    assert.equal(hit?.start, target, match[0])
+    assert.equal(src.slice(hit.start, hit.end), 'gotoPage', match[0])
+  }
+})
+
+test('Vue template entity decoding preserves offsets and v-pre stays literal', () => {
+  const src = `<template>🧩
+  <button @click="ready &amp;&amp; gotoPage(1); items.map(item =&gt; gotoPage(item))" />
+  <p>{{ ready &amp;&amp; gotoPage(2) }}</p>
+  <div v-pre @click="gotoPage(3)">{{ gotoPage }}</div>
+</template>
+<script>export default {
+  data() { return { ready: true, items: [] } },
+  methods: { gotoPage(type) {} }
+}</script>`
+  const index = buildIndex(src, 'vue')
+  for (const call of ['gotoPage(1)', 'gotoPage(item)', 'gotoPage(2)']) {
+    assert.equal(findDefinition(index, src.indexOf(call) + 1)?.start, src.indexOf('gotoPage(type)'), call)
+  }
+  const reference = src.indexOf('gotoPage(item)') + 'gotoPage('.length
+  assert.equal(findDefinition(index, reference + 1)?.start, src.indexOf('item =&gt;'))
+  assert.equal(findDefinition(index, src.indexOf('gotoPage(3)') + 1), null)
+  assert.equal(findDefinition(index, src.indexOf('{{ gotoPage }}') + 4), null)
 })
 
 test('functions, var, let, const and parameters follow lexical scope/shadowing', () => {

@@ -1,6 +1,7 @@
 'use strict'
 
 const ts = require('typescript')
+const { buildTemplateIndex } = require('./template')
 
 // Keep every offset/line unchanged so the resulting Location points into the real .vue file.
 function sourceText(text, language) {
@@ -59,7 +60,12 @@ function buildIndex(text, language, fileName = 'untitled.js') {
     ts.forEachChild(node, visit)
   }
   visit(root)
-  return { root, source, bindings, options, thisAssignments }
+  const template = language === 'vue'
+    ? buildTemplateIndex(text, expression => buildIndex(expression, kind === ts.ScriptKind.TS ? 'typescript' : 'javascript'))
+    : { expressions: [], references: [] }
+  return { root, source, bindings, options, thisAssignments, templates: template.expressions,
+    templateReferences: template.references, fileName,
+    scriptSetup: language === 'vue' && /<script\b[^>]*\bsetup(?:\s|=|>)/i.test(text) }
 }
 
 function asObject(expr) {
@@ -111,6 +117,10 @@ function vueMember(obj, name) {
     const container = member(obj, group)
     if (container && ts.isObjectLiteralExpression(container.initializer)) {
       const found = nameNode(member(container.initializer, name))
+      if (found) return found
+    }
+    if (group === 'props' && container && ts.isArrayLiteralExpression(container.initializer)) {
+      const found = container.initializer.elements.find(element => ts.isStringLiteral(element) && element.text === name)
       if (found) return found
     }
   }
@@ -216,7 +226,10 @@ function findIdentifier(root, offset) {
 }
 
 function findDefinition(index, offset) {
-  if (!index || offset < 0 || offset >= index.source.length || index.source[offset] === ' ') return null
+  if (!index || offset < 0 || offset >= index.source.length) return null
+  const expression = index.templates.find(exp => offset >= exp.start && offset < exp.end)
+  if (expression) return templateDefinition(index, expression, offset)
+  if (index.source[offset] === ' ') return null
   const id = findIdentifier(index.root, offset)
   if (!id) return null
   const parent = id.parent
@@ -231,6 +244,29 @@ function findDefinition(index, offset) {
   }
   if (!target) return null
   return { start: target.getStart(index.root), end: target.end }
+}
+
+function templateDefinition(index, expression, offset) {
+  const localOffset = expression.source.fromSource[offset - expression.start] + expression.prefix
+  const id = findIdentifier(expression.index.root, localOffset)
+  if (!id) return null
+  const parent = id.parent
+  if (ts.isPropertyAccessExpression(parent) && parent.name === id) {
+    if (parent.expression.kind !== ts.SyntaxKind.ThisKeyword || thisOwner(expression.index, id) !== expression.index.root) return null
+  } else {
+    if ((ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent) || ts.isMethodSignature(parent)) && parent.name === id) return null
+    const binding = resolveBinding(expression.index, id, localOffset)
+    if (binding) {
+      return {
+        start: expression.start + expression.source.toSource[binding.node.getStart(expression.index.root) - expression.prefix],
+        end: expression.start + expression.source.toSource[binding.node.end - expression.prefix]
+      }
+    }
+    if (expression.locals.has(id.text)) return null
+  }
+  const component = index.options[0]
+  const target = component && vueMember(component, id.text)
+  return target ? { start: target.getStart(index.root), end: target.end } : null
 }
 
 // The receiver of `this.foo` is the instance; a variable declared from `this`
