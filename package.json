@@ -3,7 +3,7 @@
   "displayName": "vueClick",
   "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.3.0",
+  "version": "0.16.0",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
@@ -26,6 +26,12 @@
     "onLanguage:typescriptreact"
   ],
   "contributes": {
+    "commands": [
+      {
+        "command": "vueClick.checkCurrentFile",
+        "title": "VueClick: 检查当前文件"
+      }
+    ],
     "languages": [
       {
         "id": "vue",
@@ -84,6 +90,18 @@
     "configuration": {
       "title": "VueClick",
       "properties": {
+        "vueClick.autoClosingTags.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "输入模板标签时补全闭合标签，尊重 html.autoClosingTags 设置。"
+        },
+        "vueClick.formatting.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "提供整份 Vue 文件的模板、脚本和样式格式化；可关闭以交给 Prettier 等格式器。"
+        },
         "vueClick.languageService.enabled": {
           "type": "boolean",
           "default": true,
@@ -92,9 +110,9 @@
         },
         "vueClick.diagnostics.enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "resource",
-          "description": "显示 Vue 脚本、模板及 CSS/SCSS/Less 诊断，遵循项目的 jsconfig/tsconfig。"
+          "description": "自动显示 Vue 脚本、模板及 CSS/SCSS/Less 诊断；启用后会在活动 Vue 文档打开或编辑后分析项目。"
         },
         "vueClick.definition.enabled": {
           "type": "boolean",
@@ -129,6 +147,7 @@
   },
   "devDependencies": {
     "@volar/typescript": "2.4.23",
+    "@vscode/emmet-helper": "2.11.0",
     "@vscode/test-electron": "2.5.2",
     "@vscode/vsce": "^3.6.0",
     "@vue/compiler-dom": "^3.5.43",

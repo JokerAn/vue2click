@@ -3,12 +3,14 @@
 const { createLanguageClient } = require('./language-client')
 const { createEmbeddedService } = require('./embedded')
 const { declarationInfo, documentSymbols, nodeAt } = require('./insight')
+const { scriptFolding, scriptSelection, scriptFormatting, scriptHighlights } = require('./script-editing')
 const path = require('node:path')
 const { pathToFileURL, fileURLToPath } = require('node:url')
 
 function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   const client = createLanguageClient(vscode, context)
   const embedded = createEmbeddedService()
+  require('./tag-closing').registerTagClosing(vscode, context, documentIndex, embedded)
   const selector = [{ language: 'vue', scheme: 'file' }]
   const hoverSelector = ['vue', 'javascript', 'javascriptreact', 'typescript', 'typescriptreact']
     .map(language => ({ language, scheme: 'file' }))
@@ -65,6 +67,10 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
     if (entry.documentation) {
       item.documentation = markdown(typeof entry.documentation === 'string' ? entry.documentation : entry.documentation.value)
     }
+    if (entry.changes) {
+      item.additionalTextEdits = entry.changes.filter(change => change.fileName === document.fileName)
+        .flatMap(change => change.textChanges.map(edit => vscode.TextEdit.replace(span(document, edit.span), edit.newText)))
+    }
     return item
   }
   const register = (name, ...args) => {
@@ -85,6 +91,16 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   register('registerHoverProvider', hoverSelector, {
     async provideHover(document, position, token) {
       const index = documentIndex(document)
+      const reference = index.templateReferences.find(value => document.offsetAt(position) >= value.start && document.offsetAt(position) < value.end)
+      const component = reference ? await query('componentHover', document, position, token) : null
+      if (component) {
+        const contents = new vscode.MarkdownString()
+        contents.appendCodeblock(component.text, 'typescript')
+        if (component.documentation) {
+          contents.appendMarkdown('\n\n' + component.documentation)
+        }
+        return new vscode.Hover(contents, span(document, component.span))
+      }
       const entry = embedded.at(document, index, position)
       if (entry) {
         const info = entry.service.doHover(entry.document, position, entry.parsed)
@@ -212,23 +228,49 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       }
       const index = documentIndex(document)
       const entry = embedded.at(document, index, position)
+      const template = require('./template-editing').templateContext(index, document.offsetAt(position))
+      let templateItems = []
+      if (template) {
+        const items = await query('templateCompletions', document, position, token) || []
+        const extra = template.kind === 'tag' ? await query('indirectCompletion', document, position, token) || [] : []
+        const html = entry?.language === 'html' && await entry.service.doComplete2(entry.document, position, entry.parsed, documentContext)
+        templateItems = [
+          ...items.map(value => completeItem(value, document)),
+          ...extra.map(value => completeItem(value, document)),
+          ...(html?.items || []).map(value => completeItem(value, document))
+        ]
+        if (template.kind !== 'value' || !template.bound) {
+          return new vscode.CompletionList(templateItems, false)
+        }
+      }
       if (entry) {
         const result = await entry.service.doComplete2(entry.document, position, entry.parsed, documentContext)
         const extra = entry.language === 'html' ? await query('indirectCompletion', document, position, token) : []
+        const config = vscode.workspace.getConfiguration('emmet', document.uri)
+        const keys = ['showExpandedAbbreviation', 'showAbbreviationSuggestions', 'syntaxProfiles', 'variables',
+          'preferences', 'excludeLanguages', 'showSuggestionsAsSnippets']
+        const options = Object.fromEntries(keys.map(key => [key, config.get(key)]).filter(([, value]) => value !== undefined))
+        const nativeEmmet = vscode.extensions?.getExtension('vscode.emmet')
+        const mappings = config.get('includeLanguages', {})
+        const nativeVueEmmet = nativeEmmet?.isActive && ['vue', 'vueclick-html'].some(language =>
+          ['html', 'xml'].includes(mappings[language]))
+        const emmet = !nativeVueEmmet && !options.excludeLanguages?.includes('vue')
+          ? require('./emmet').emmetCompletions(entry, position, options) : []
         return new vscode.CompletionList([
           ...result.items.map(value => completeItem(value, document)),
-          ...(extra || []).map(value => completeItem(value, document))
+          ...(extra || []).map(value => completeItem(value, document)),
+          ...emmet.map(value => completeItem(value, document))
         ], result.isIncomplete)
       }
       const info = await query('completion', document, position, token) || { entries: [] }
       const extra = await query('indirectCompletion', document, position, token)
       const names = new Set(info.entries.map(value => value.name))
       info.entries.push(...(extra || []).filter(value => !names.has(value.name)))
-      return info ? new vscode.CompletionList(info.entries.map(value => {
+      return new vscode.CompletionList([...templateItems, ...info.entries.map(value => {
         const item = completeItem(value, document)
         item.vueClick = { document, position, entry: value, version: document.version }
         return item
-      }), info.isIncomplete) : undefined
+      })], info.isIncomplete)
     },
     async resolveCompletionItem(item, token) {
       const value = item.vueClick
@@ -253,17 +295,27 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   }, '.', '<', ':', '@', '"', "'", '/', '-')
   register('registerDocumentFormattingEditProvider', selector, {
     provideDocumentFormattingEdits(document, options) {
+      if (!vscode.workspace.getConfiguration('vueClick', document.uri).get('formatting.enabled', true)) {
+        return []
+      }
       const { TextDocument } = require('vscode-languageserver-textdocument')
       const index = documentIndex(document)
-      return embedded.entries(document, index).flatMap(entry => {
+      const language = index.blocks.some(block => block.tag === 'script' && /^(ts|tsx|typescript)$/.test(block.lang || '')) ? 'typescript' : 'javascript'
+      const settings = vscode.workspace.getConfiguration(language + '.format', document.uri)
+      const keys = ['insertSpaceAfterCommaDelimiter', 'insertSpaceBeforeAndAfterBinaryOperators',
+        'insertSpaceAfterOpeningAndBeforeClosingNonemptyBraces', 'semicolons', 'placeOpenBraceOnNewLineForFunctions']
+      const scriptOptions = Object.fromEntries(keys.map(key => [key, settings.get(key)]).filter(([, value]) => value !== undefined))
+      const scripts = scriptFormatting(index, { ...options, ...scriptOptions })
+        .map(edit => vscode.TextEdit.replace(span(document, edit.span), edit.newText))
+      return [...scripts, ...embedded.entries(document, index).flatMap(entry => {
         const blockRange = { start: document.positionAt(entry.block.start), end: document.positionAt(entry.block.end) }
         const source = TextDocument.create(document.uri.toString(), entry.language, document.version, index.text)
-        // Limit every formatter edit to the inner block; JS is formatted by its language service.
+        // Each embedded formatter must stay inside its own source block.
         return entry.service.format(source, blockRange, { ...options, wrapLineLength: 120,
           templating: true, indentInnerHtml: true }).filter(edit =>
           source.offsetAt(edit.range.start) >= entry.block.start && source.offsetAt(edit.range.end) <= entry.block.end)
           .map(edit => vscode.TextEdit.replace(range(edit.range), edit.newText))
-      })
+      })]
     }
   })
   register('registerColorProvider', selector, {
@@ -308,17 +360,26 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   })
   register('registerDocumentHighlightProvider', selector, {
     provideDocumentHighlights(document, position) {
-      const entry = embedded.at(document, documentIndex(document), position)
+      const index = documentIndex(document)
+      const offset = document.offsetAt(position)
+      if (index.blocks.some(block => block.tag === 'script' && !block.external && offset >= block.start && offset <= block.end)) {
+        return scriptHighlights(index, offset).map(value => new vscode.DocumentHighlight(span(document, value.textSpan),
+          value.kind === 'writtenReference' ? vscode.DocumentHighlightKind.Write : vscode.DocumentHighlightKind.Read))
+      }
+      const entry = embedded.at(document, index, position)
       return entry ? entry.service.findDocumentHighlights(entry.document, position, entry.parsed)
         .map(value => new vscode.DocumentHighlight(range(value.range), value.kind)) : undefined
     }
   })
   register('registerFoldingRangeProvider', selector, {
     provideFoldingRanges(document) {
-      return embedded.entries(document, documentIndex(document)).flatMap(entry => [
+      const index = documentIndex(document)
+      const scripts = scriptFolding(index).map(value => new vscode.FoldingRange(
+        document.positionAt(value.start).line, document.positionAt(value.end).line))
+      return [...scripts, ...embedded.entries(document, index).flatMap(entry => [
         new vscode.FoldingRange(document.positionAt(entry.block.start).line, document.positionAt(entry.block.end).line),
         ...entry.service.getFoldingRanges(entry.document).map(value => new vscode.FoldingRange(value.startLine, value.endLine))
-      ])
+      ])]
     }
   })
   register('registerSelectionRangeProvider', selector, {
@@ -327,7 +388,15 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         return value ? new vscode.SelectionRange(range(value.range), convert(value.parent)) : undefined
       }
       return positions.map(position => {
-        const entry = embedded.at(document, documentIndex(document), position)
+        const index = documentIndex(document)
+        const offset = document.offsetAt(position)
+        if (index.blocks.some(block => block.tag === 'script' && !block.external && offset >= block.start && offset <= block.end)) {
+          function scriptRange(value) {
+            return value ? new vscode.SelectionRange(span(document, value.textSpan), scriptRange(value.parent)) : undefined
+          }
+          return scriptRange(scriptSelection(index, offset))
+        }
+        const entry = embedded.at(document, index, position)
         const values = entry && (entry.language === 'html'
           ? entry.service.getSelectionRanges(entry.document, [position])
           : entry.service.getSelectionRanges(entry.document, [position], entry.parsed))
@@ -337,6 +406,101 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   })
   const diagnostics = vscode.languages.createDiagnosticCollection('vueClick')
   const timers = new Map()
+  context.subscriptions.push(vscode.commands.registerCommand('vueClick.checkCurrentFile', async () => {
+    const document = vscode.window.activeTextEditor?.document
+    if (!document || document.languageId !== 'vue' || document.uri.scheme !== 'file') {
+      return vscode.window.showInformationMessage('请先打开一个 Vue 文件。')
+    }
+    return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
+      title: 'VueClick: 检查当前文件', cancellable: true }, (_, token) => checkDocument(document, token))
+  }))
+  function workspaceEdit(document, changes) {
+    const result = new vscode.WorkspaceEdit()
+    for (const change of changes || []) {
+      if (change.fileName !== document.fileName || change.isNewFile) {
+        return undefined
+      }
+      for (const edit of change.textChanges) {
+        result.replace(document.uri, span(document, edit.span), edit.newText)
+      }
+    }
+    return result
+  }
+  register('registerCodeActionsProvider', selector, {
+    async provideCodeActions(document, selection, context, token) {
+      const actions = []
+      const sourceOnly = context.only?.value?.startsWith('source.')
+      if (!context.only || sourceOnly) {
+        for (const [title, kind, mode] of [
+          ['VueClick: 整理 import', vscode.CodeActionKind.SourceOrganizeImports, 'SortAndCombine'],
+          ['VueClick: 移除未使用 import', vscode.CodeActionKind.Source.append('removeUnusedImports'), 'RemoveUnused']
+        ]) {
+          if (!context.only || context.only.contains(kind)) {
+            const action = new vscode.CodeAction(title, kind)
+            action.vueClick = { document, version: document.version, mode }
+            actions.push(action)
+          }
+        }
+      }
+      const errors = context.diagnostics.filter(value => [2304, 2552, 6133, 6192].includes(Number(value.code)))
+      if (!sourceOnly && errors.length) {
+        const fixes = await query('codeFixes', document, selection.start, token,
+          { end: document.offsetAt(selection.end), codes: errors.map(value => Number(value.code)) }) || []
+        for (const fix of fixes) {
+          const edit = workspaceEdit(document, fix.changes)
+          if (edit) {
+            const action = new vscode.CodeAction(fix.title, vscode.CodeActionKind.QuickFix)
+            action.edit = edit
+            action.diagnostics = errors
+            actions.push(action)
+          }
+        }
+      }
+      return actions
+    },
+    async resolveCodeAction(action, token) {
+      const value = action.vueClick
+      if (value && value.document.version === value.version) {
+        const changes = await query('organizeImports', value.document, 0, token, { mode: value.mode })
+        if (value.document.version === value.version) {
+          action.edit = workspaceEdit(value.document, changes)
+        }
+      }
+      return action
+    }
+  }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix, vscode.CodeActionKind.SourceOrganizeImports,
+    vscode.CodeActionKind.Source.append('removeUnusedImports')] })
+  async function checkDocument(document, token) {
+    const version = document.version
+    const result = await query('diagnostics', document, 0, token)
+    if (!result || token?.isCancellationRequested || document.version !== version || document.isClosed) {
+      return
+    }
+    const values = result.entries.map(value => {
+      const diagnostic = new vscode.Diagnostic(span(document, value), value.message,
+        value.category === 1 ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning)
+      diagnostic.source = 'VueClick TS'
+      diagnostic.code = value.code
+      return diagnostic
+    })
+    for (const entry of embedded.entries(document, documentIndex(document))) {
+      if (entry.language === 'html') {
+        const source = languageTemplateDiagnostics(documentIndex(document))
+        values.push(...source.map(value => new vscode.Diagnostic(
+          new vscode.Range(document.positionAt(value.start), document.positionAt(value.end)),
+          value.message, vscode.DiagnosticSeverity.Error)))
+        continue
+      }
+      for (const value of entry.service.doValidation(entry.document, entry.parsed)) {
+        const diagnostic = new vscode.Diagnostic(range(value.range), value.message,
+          value.severity === 1 ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning)
+        diagnostic.source = 'VueClick CSS'
+        values.push(diagnostic)
+      }
+    }
+    diagnostics.set(document.uri, values)
+    return values.length
+  }
   function schedule(document) {
     const key = document.uri.toString()
     clearTimeout(timers.get(key))
@@ -346,7 +510,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
     if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document !== document) {
       return
     }
-    if (!enabled(document) || !vscode.workspace.getConfiguration('vueClick', document.uri).get('diagnostics.enabled', true)) {
+    if (!enabled(document) || !vscode.workspace.getConfiguration('vueClick', document.uri).get('diagnostics.enabled', false)) {
       diagnostics.delete(document.uri)
       return
     }
@@ -355,34 +519,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document !== document) {
         return
       }
-      const version = document.version
-      const result = await query('diagnostics', document, 0)
-      if (!result || document.version !== version || document.isClosed) {
-        return
-      }
-      const values = result.entries.map(value => {
-        const diagnostic = new vscode.Diagnostic(span(document, value), value.message,
-          value.category === 1 ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning)
-        diagnostic.source = 'VueClick TS'
-        diagnostic.code = value.code
-        return diagnostic
-      })
-      for (const entry of embedded.entries(document, documentIndex(document))) {
-        if (entry.language === 'html') {
-          const source = languageTemplateDiagnostics(documentIndex(document))
-          values.push(...source.map(value => new vscode.Diagnostic(
-            new vscode.Range(document.positionAt(value.start), document.positionAt(value.end)),
-            value.message, vscode.DiagnosticSeverity.Error)))
-          continue
-        }
-        for (const value of entry.service.doValidation(entry.document, entry.parsed)) {
-          const diagnostic = new vscode.Diagnostic(range(value.range), value.message,
-            value.severity === 1 ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning)
-          diagnostic.source = 'VueClick CSS'
-          values.push(diagnostic)
-        }
-      }
-      diagnostics.set(document.uri, values)
+      await checkDocument(document)
     }, 600))
   }
   context.subscriptions.push(client, embedded, diagnostics,

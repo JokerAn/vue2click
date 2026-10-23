@@ -4,7 +4,7 @@ const { Worker } = require('node:worker_threads')
 const path = require('node:path')
 const fs = require('node:fs')
 
-function createLanguageClient(vscode, context) {
+function createLanguageClient(vscode, context, WorkerClass = Worker) {
   const projects = new Map()
   let sequence = 0
   function stamp(file) {
@@ -16,12 +16,49 @@ function createLanguageClient(vscode, context) {
     }
   }
   function dispose(project) {
+    project.disposed = true
+    project.queue.length = 0
+    project.active = null
     project.worker.terminate()
     for (const pending of project.pending.values()) {
       pending.resolve(undefined)
       pending.dispose()
     }
     project.pending.clear()
+  }
+  function dispatch(project) {
+    if (project.disposed || project.active !== null) {
+      return
+    }
+    while (project.queue.length) {
+      const request = project.queue.shift()
+      const pending = project.pending.get(request.id)
+      if (!pending) {
+        continue
+      }
+      if (request.token?.isCancellationRequested || !request.isCurrent()) {
+        project.pending.delete(request.id)
+        pending.dispose()
+        pending.resolve(undefined)
+        continue
+      }
+      project.active = request.id
+      try {
+        project.worker.postMessage(request.message)
+        for (const [file, entry] of request.sentToAdd) {
+          project.sent.set(file, entry)
+        }
+        for (const file of request.sentToRemove) {
+          project.sent.delete(file)
+        }
+        return
+      } catch (error) {
+        project.active = null
+        project.pending.delete(request.id)
+        pending.dispose()
+        pending.reject(error)
+      }
+    }
   }
   function rootFor(document) {
     const workspace = vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath
@@ -54,11 +91,14 @@ function createLanguageClient(vscode, context) {
         const workerPath = fs.existsSync(bundledWorker) ? bundledWorker : path.join(__dirname, 'language-worker.js')
         const libDirectory = path.join(path.dirname(bundledWorker), 'typescript')
         project = {
-          worker: new Worker(workerPath, { workerData: {
+          worker: new WorkerClass(workerPath, { workerData: {
             root, firstFile: document.fileName,
             libDirectory: fs.existsSync(libDirectory) ? libDirectory : undefined
           } }),
           pending: new Map(),
+          queue: [],
+          active: null,
+          disposed: false,
           sent: new Map(),
           configs: new Map(['tsconfig.json', 'jsconfig.json', 'package.json', '.gitignore']
             .map(file => [path.join(root, file), stamp(path.join(root, file))]))
@@ -75,8 +115,15 @@ function createLanguageClient(vscode, context) {
               pending.resolve(response.result)
             }
           }
+          if (current.active === response.id) {
+            current.active = null
+            dispatch(current)
+          }
         })
         project.worker.on('error', error => {
+          current.disposed = true
+          current.active = null
+          current.queue.length = 0
           for (const pending of current.pending.values()) {
             pending.dispose()
             pending.reject(error)
@@ -93,42 +140,59 @@ function createLanguageClient(vscode, context) {
       }
       projects.delete(root)
       projects.set(root, project)
-      const sourceDocuments = (vscode.workspace.textDocuments || [document])
+      const openDocuments = (vscode.workspace.textDocuments || [document])
         .filter(source => source.uri.scheme === 'file' && /\.(vue|[cm]?[jt]sx?)$/.test(source.fileName))
+      const sourceDocuments = openDocuments.some(source => source.fileName === document.fileName)
+        ? openDocuments : [...openDocuments, document]
+      const versions = new Map(sourceDocuments.map(source => [source, source.version]))
       const snapshots = sourceDocuments.map(source => {
         const previous = project.sent.get(source.fileName)
         const entry = { fileName: source.fileName, version: source.version }
         if (previous?.document !== source || previous?.version !== source.version) {
           entry.text = source.getText()
         }
-        project.sent.set(source.fileName, { document: source, version: source.version })
         return entry
       })
-      for (const file of project.sent.keys()) {
-        if (!sourceDocuments.some(source => source.fileName === file)) {
-          project.sent.delete(file)
-        }
-      }
-      if (!snapshots.some(source => source.fileName === document.fileName)) {
-        snapshots.push({ fileName: document.fileName, version: document.version, text: document.getText() })
-      }
+      const sentToAdd = sourceDocuments.map(source =>
+        [source.fileName, { document: source, version: source.version }])
+      const sentToRemove = [...project.sent.keys()].filter(file =>
+        !sourceDocuments.some(source => source.fileName === file))
       const version = document.version
+      const isCurrent = () => document.version === version &&
+        [...versions].every(([source, sourceVersion]) => !source.isClosed && source.version === sourceVersion)
       const result = await new Promise((resolve, reject) => {
         const id = ++sequence
-        const cancel = token?.onCancellationRequested?.(() => {
+        let cancel
+        const pending = { resolve, reject, dispose: () => cancel?.dispose() }
+        const cancelRequest = () => {
+          if (!project.pending.has(id)) {
+            return
+          }
           project.pending.delete(id)
-          cancel?.dispose()
+          if (project.active !== id) {
+            project.queue = project.queue.filter(request => request.id !== id)
+          }
+          pending.dispose()
           resolve(undefined)
+        }
+        project.pending.set(id, pending)
+        project.queue.push({
+          id, token, isCurrent, sentToAdd, sentToRemove,
+          message: {
+            id, method, documents: snapshots, fileName: document.fileName,
+            offset: typeof position === 'number' ? position : document.offsetAt(position), args
+          }
         })
-        project.pending.set(id, { resolve, reject, dispose: () => cancel?.dispose() })
-        project.worker.postMessage({
-          id, method, documents: snapshots, fileName: document.fileName,
-          offset: typeof position === 'number' ? position : document.offsetAt(position), args
-        })
+        cancel = token?.onCancellationRequested?.(cancelRequest)
+        if (!project.pending.has(id)) {
+          cancel?.dispose()
+        } else if (token?.isCancellationRequested) {
+          cancelRequest()
+        } else {
+          dispatch(project)
+        }
       })
-      return document.version === version && !token?.isCancellationRequested &&
-        sourceDocuments.every(source => snapshots.find(value => value.fileName === source.fileName)?.version === source.version)
-        ? result : undefined
+      return isCurrent() && !token?.isCancellationRequested ? result : undefined
     },
     invalidate() {
       for (const project of projects.values()) {

@@ -69,6 +69,7 @@ function createProjectService(root, firstFile, libDirectory) {
     }
   }
   roots.add(normalize(firstFile))
+  let componentFiles = new Set([...roots].filter(file => file.endsWith('.vue')))
   let target = 2.7
   for (let directory = path.dirname(firstFile);;) {
     try {
@@ -231,6 +232,14 @@ function createProjectService(root, firstFile, libDirectory) {
   const indirect = createIndirectService(
     () => [...new Set([...projectFiles, ...buffers.keys()])].filter(file => !file.endsWith('.vue') && !file.endsWith('.d.ts')),
     loadIndex, moduleResolver, () => globalRevision)
+  const libraryData = require('./library-data').createLibraryData(configRoot)
+
+  async function componentMetadata(index, tag) {
+    return await require('./component-info').componentInfo(index, tag, {
+      loadIndex, resolveModule: moduleResolver
+    }) || await indirect.componentInfo(index, tag) ||
+      libraryData.components().find(component => component.name === tag) || null
+  }
 
   function sync(documents) {
     const active = new Set()
@@ -249,7 +258,12 @@ function createProjectService(root, firstFile, libDirectory) {
         }
       }
       if (file.startsWith(root + '/')) {
-        roots.add(file)
+        if (!roots.has(file)) {
+          roots.add(file)
+          if (file.endsWith('.vue')) {
+            componentFiles = new Set(componentFiles).add(file)
+          }
+        }
       }
     }
     for (const file of buffers.keys()) {
@@ -282,6 +296,9 @@ function createProjectService(root, firstFile, libDirectory) {
       file = normalize(file)
       projectVersion++
       globalRevision++
+      if (file.endsWith('.json')) {
+        libraryData.invalidate()
+      }
       disk.delete(file)
       indexes.delete(file)
       if (kind === 'create' || kind === 'delete') {
@@ -292,9 +309,17 @@ function createProjectService(root, firstFile, libDirectory) {
       }
       if (kind === 'delete') {
         roots.delete(file)
+        if (file.endsWith('.vue')) {
+          const next = new Set(componentFiles)
+          next.delete(file)
+          componentFiles = next
+        }
         projectFiles = projectFiles.filter(value => value !== file)
       } else if (kind === 'create' && !projectFilesHost.ignored(file) && /\.(vue|[cm]?[jt]sx?)$/.test(file)) {
         roots.add(file)
+        if (file.endsWith('.vue')) {
+          componentFiles = new Set(componentFiles).add(file)
+        }
         if (!projectFiles.includes(file)) {
           projectFiles.push(file)
         }
@@ -302,6 +327,49 @@ function createProjectService(root, firstFile, libDirectory) {
     },
     async run(method, file, offset, args = {}) {
       file = normalize(file)
+      if (method === 'templateCompletions') {
+        const index = await loadIndex(file)
+        if (!index) {
+          return []
+        }
+        const { templateContext, metadataCompletions } = require('./template-editing')
+        const context = templateContext(index, offset)
+        if (!context) {
+          return []
+        }
+        if (context.kind === 'tag') {
+          const prefix = context.prefix.toLowerCase()
+          return [
+            ...await require('./component-imports').componentCandidates(index, componentFiles, context.prefix,
+              (specifier, from) => moduleResolver(specifier, from), projectVersion),
+            ...libraryData.components().filter(component => component.name.toLowerCase().startsWith(prefix) ||
+              component.name.replace(/([a-z\d])([A-Z])/g, '$1-$2').toLowerCase().startsWith(prefix))
+              .map(component => ({ name: component.name, kind: 'class',
+              documentation: component.documentation, detail: component.source || 'Workspace component' }))
+          ].map(entry => ({ ...entry, replacementSpan: { start: context.start, length: context.end - context.start } }))
+        }
+        return metadataCompletions(index, offset, await componentMetadata(index, context.tag), context)
+      }
+      if (method === 'componentHover') {
+        const index = await loadIndex(file)
+        const reference = index?.templateReferences.find(reference => offset >= reference.start && offset < reference.end)
+        return reference ? require('./template-editing').metadataHover(index, offset, await componentMetadata(index, reference.tag)) : null
+      }
+      if (method === 'highlights') {
+        return (service.getDocumentHighlights(file, offset, [file]) || []).flatMap(group => group.highlightSpans)
+          .map(value => ({ ...value.textSpan, kind: value.kind }))
+      }
+      if (method === 'organizeImports') {
+        return service.organizeImports({ type: 'file', fileName: file, mode: args.mode || 'All' },
+          { indentSize: 2, tabSize: 2, convertTabsToSpaces: true, newLineCharacter: '\n' }, {})
+      }
+      if (method === 'codeFixes') {
+        const errors = args.codes || []
+        return service.getCodeFixesAtPosition(file, offset, args.end ?? offset, errors,
+          { indentSize: 2, tabSize: 2, convertTabsToSpaces: true, newLineCharacter: '\n' },
+          { importModuleSpecifierPreference: 'relative' }).filter(fix => fix.fixName === 'import' || fix.fixName === 'unusedIdentifier')
+          .map(fix => ({ title: fix.description, changes: fix.changes }))
+      }
       if (method === 'stats') {
         return { rootFiles: roots.size, loadedSnapshots: disk.size,
           heapUsed: process.memoryUsage().heapUsed, external: process.memoryUsage().external }

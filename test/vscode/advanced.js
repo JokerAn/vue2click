@@ -23,7 +23,7 @@ async function runAdvanced(directory) {
 import Child from './Child.vue'
 import mixin from './mixin'
 export default {
-  components: { Child }, mixins: [mixin],
+  components:{Child}, mixins:[mixin],
   data() { return { count: 1, rows: ['one'] } },
   methods: {
     /** 保存一个名称。
@@ -46,6 +46,9 @@ $brand: #ff0000;
   fs.writeFileSync(path.join(root, 'utils.ts'), '/** 格式化发票。 */ export function formatInvoice(value: string) { return value.trim() }')
   const document = await vscode.workspace.openTextDocument(file)
   await vscode.window.showTextDocument(document)
+  const config = vscode.workspace.getConfiguration('vueClick', document.uri)
+  assert.equal(config.get('diagnostics.enabled'), false, 'project diagnostics should be opt-in by default')
+  await config.update('diagnostics.enabled', true, vscode.ConfigurationTarget.Workspace)
   const position = (marker, extra = 1) => {
     const offset = document.getText().indexOf(marker)
     assert.ok(offset >= 0, marker)
@@ -99,10 +102,13 @@ $brand: #ff0000;
   const formatting = await vscode.commands.executeCommand('vscode.executeFormatDocumentProvider', document.uri,
     { tabSize: 2, insertSpaces: true })
   assert.ok(formatting.length, 'embedded format provider returns block edits')
-  for (const edit of formatting) {
-    const offset = document.offsetAt(edit.range.start)
-    assert.ok(offset < content.indexOf('<script') || offset > content.indexOf('</script>'), 'formatter must not modify scripts')
-  }
+  assert.ok(formatting.some(edit => document.offsetAt(edit.range.start) > content.indexOf('<script') &&
+    document.offsetAt(edit.range.end) < content.indexOf('</script>')), 'whole Vue formatter must include script edits')
+  await config.update('formatting.enabled', false, vscode.ConfigurationTarget.Workspace)
+  const noFormatting = await vscode.commands.executeCommand('vscode.executeFormatDocumentProvider', document.uri,
+    { tabSize: 2, insertSpaces: true })
+  assert.ok(!noFormatting || noFormatting.length === 0, 'formatting can be handed to an external formatter')
+  await config.update('formatting.enabled', undefined, vscode.ConfigurationTarget.Workspace)
   const edit = new vscode.WorkspaceEdit()
   const offset = content.indexOf("this.save('demo', 2)") + "this.save(".length
   edit.replace(document.uri, new vscode.Range(document.positionAt(offset), document.positionAt(offset + 6)), '123')
@@ -118,11 +124,12 @@ $brand: #ff0000;
   } while (Date.now() < deadline)
   assert.ok(diagnostics.some(value => value.code === 2345 && document.getText(value.range) === '123'), 'mapped type diagnostics')
   // A disabled project service still has reliable static JSDoc fallback.
-  const config = vscode.workspace.getConfiguration('vueClick', document.uri)
   await config.update('languageService.enabled', false, vscode.ConfigurationTarget.Workspace)
   const fallback = await command('vscode.executeHoverProvider', 'this.save', 7)
   assert.match(fallback.flatMap(value => value.contents).map(value => value.value || value).join('\n'), /保存一个名称/)
   await config.update('languageService.enabled', undefined, vscode.ConfigurationTarget.Workspace)
+  await config.update('diagnostics.enabled', undefined, vscode.ConfigurationTarget.Workspace)
+  await require('./daily-editing').runDailyEditing(directory)
   console.log('Advanced Vue2 editing checks passed on VS Code ' + vscode.version)
 }
 

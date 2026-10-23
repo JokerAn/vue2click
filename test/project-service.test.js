@@ -25,6 +25,23 @@ function fixture(t, files) {
   return { root, file, service }
 }
 
+test('project metadata refreshes after its JSON file changes', async t => {
+  const text = '<template><custom-child mode="" /></template><script>export default {}</script>'
+  const { root, file, service } = fixture(t, {
+    'Parent.vue': text,
+    'package.json': JSON.stringify({ vetur: { tags: 'tags.json', attributes: 'attributes.json' } }),
+    'tags.json': JSON.stringify({ 'custom-child': { attributes: ['mode'] } }),
+    'attributes.json': JSON.stringify({ 'custom-child/mode': { type: 'string', options: ['edit'] } })
+  })
+  const offset = text.indexOf('mode="') + 'mode="'.length
+  const items = await service.run('templateCompletions', file, offset)
+  assert.deepEqual(items.map(item => item.name), ['edit'])
+  const metadata = path.join(root, 'attributes.json')
+  fs.writeFileSync(metadata, JSON.stringify({ 'custom-child/mode': { type: 'string', options: ['view'] } }))
+  service.invalidate(metadata, 'change')
+  assert.deepEqual((await service.run('templateCompletions', file, offset)).map(item => item.name), ['view'])
+})
+
 test('Vue2 semantic service maps types, errors, signatures, references and rename back to source', async t => {
   const text = `<template>{{ count }} {{ unknownValue }}</template><script lang="ts">
   export default {
@@ -211,4 +228,67 @@ test('creating a previously missing Vue import invalidates the language resolver
   const found = await service.run('diagnostics', file, 0)
   assert.ok(!found.entries.some(value => value.code === 2307))
   assert.ok(found.entries.some(value => value.code === 2322))
+})
+
+test('template candidates include prop contracts, events and component import registration edits', async t => {
+  const text = `<template><Child :mode="" @saved="run" /><Invoice /></template><script lang="ts">
+import Child from './Child.vue'; export default { components: { Child }, methods: { run() {} } }
+</script>`
+  const { file, service } = fixture(t, {
+    'Parent.vue': text,
+    'Child.vue': `<script lang="ts">export default { props: { /** Display mode. */ mode: {
+      type: String as PropType<'edit' | 'view'>, default: 'view', required: true } }, emits: ['saved'] }</script>`,
+    'InvoiceDialog.vue': '<script>export default {}</script>'
+  })
+  const values = await service.run('templateCompletions', file, text.indexOf(':mode="') + 7)
+  assert.deepEqual(values.map(value => value.name), ["'edit'", "'view'"])
+  const hover = await service.run('componentHover', file, text.indexOf(':mode') + 2)
+  assert.match(hover.text, /required/)
+  assert.match(hover.documentation, /Display mode/)
+  const candidates = await service.run('templateCompletions', file, text.indexOf('<Invoice') + 8)
+  assert.ok(candidates.some(value => value.name === 'InvoiceDialog' &&
+    value.changes[0].textChanges.some(edit => edit.newText.includes('InvoiceDialog.vue'))))
+})
+
+test('import fixes and removal map to Vue source and retain imports used by the template', async t => {
+  const text = `<template>{{ active }}</template><script lang="ts">
+import { unused, active } from './utils'
+export default { methods: { run() { return formatInvoice('test') } } }
+</script>`
+  const { file, service } = fixture(t, {
+    'Parent.vue': text,
+    'utils.ts': 'export const active = 1; export const unused = 2; export function formatInvoice(value: string) { return value.trim() }'
+  })
+  await service.run('quickInfo', file, text.indexOf('formatInvoice'))
+  const fixes = await service.run('codeFixes', file, text.indexOf('formatInvoice'),
+    { end: text.indexOf('formatInvoice') + 13, codes: [2304] })
+  assert.ok(fixes.some(fix => fix.changes.some(change => change.textChanges.some(edit => edit.newText.includes('formatInvoice')))))
+  const remove = await service.run('organizeImports', file, 0, { mode: 'RemoveUnused' })
+  const edits = remove.flatMap(change => change.textChanges)
+  assert.ok(edits.length)
+  assert.ok(edits.every(edit => edit.span.start >= text.indexOf('<script') && edit.span.start + edit.span.length <= text.indexOf('</script>')))
+  let updated = text
+  for (const edit of [...edits].sort((a, b) => b.span.start - a.span.start)) {
+    updated = updated.slice(0, edit.span.start) + edit.newText + updated.slice(edit.span.start + edit.span.length)
+  }
+  assert.match(updated, /import.*active/)
+  assert.ok(!/import.*unused/.test(updated))
+})
+
+test('installed Element UI 2 metadata supplies component, prop, value and event hints without importing its code', async t => {
+  const text = `<template><el-select si /><el-select :size="" @ /></template><script>export default {}</script>`
+  const { root, file, service } = fixture(t, { 'Parent.vue': text })
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { 'element-ui': '^2.15.0' } }))
+  const element = path.join(root, 'node_modules/element-ui')
+  fs.mkdirSync(element, { recursive: true })
+  fs.writeFileSync(path.join(element, 'package.json'), '{"version":"2.15.14","main":"throw.js"}')
+  fs.writeFileSync(path.join(element, 'throw.js'), 'throw new Error("package code must not execute")')
+  const tag = await service.run('templateCompletions', file, text.indexOf('<el-select') + 3)
+  assert.ok(tag.some(value => value.name === 'el-select' && value.detail === 'element-ui@2.15.14'))
+  const prop = await service.run('templateCompletions', file, text.indexOf('si />') + 2)
+  assert.ok(prop.some(value => value.name === 'size'))
+  const values = await service.run('templateCompletions', file, text.indexOf(':size="') + 7)
+  assert.deepEqual(values.map(value => value.name), ['"medium"', '"small"', '"mini"'])
+  const events = await service.run('templateCompletions', file, text.indexOf(' @ />') + 2)
+  assert.ok(events.some(value => value.name === 'change' && value.detail === 'change'))
 })

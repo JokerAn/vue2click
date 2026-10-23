@@ -2,7 +2,7 @@
 
 一个面向 Vue 2 日常开发的独立 VS Code 扩展。提供单文件组件高亮、快速定义跳转、代码片段，以及 Vue/TypeScript 语义补全、自动导入、类型检查、悬停、参数提示、引用与重命名。支持成员大纲、常见静态 mixin/全局/Vuex/`$refs`/事件关系，以及 HTML/CSS 编辑辅助。不依赖 Vetur 或 Vue - Official。
 
-## 0.3.0 的使用场景
+## 0.16 的使用场景
 
 | 能力 | 常见操作 |
 | --- | --- |
@@ -19,10 +19,19 @@
 | 组件事件 | 从父组件的 `@saved` 跳到子组件的 `$emit('saved')` 或 emits 声明 |
 | 循环与插槽变量 | 从使用位置跳到 v-for、v-slot、slot-scope 中的声明，支持解构与嵌套遮蔽 |
 | HTML / CSS / SCSS / Less | 补全、悬停、块内格式化、链接、折叠、关联标签编辑、CSS 诊断、颜色与变量跳转 |
+| 组件契约提示 | 在模板里查看子组件 props 的类型、必填、默认值、JSDoc 和明确字面量选项；`@` 后提示静态 emits / `$emit` 事件 |
+| 模板组件导入 | 输入本项目 Vue 文件名时可补全组件；选择后自动补 import 和 Options API `components` 注册，`script setup` 只补 import |
+| 脚本阅读辅助 | Vue `<script>` 内的折叠、真实同符号高亮和逐级智能选区 |
+| 按需检查 | 命令面板运行 **VueClick: 检查当前文件**，需要时才分析；不会开启打开文件自动诊断 |
+| 精选代码操作 | `Ctrl/Cmd + .` 自动导入缺失符号、整理 imports 或移除确认未使用的 imports |
+| 标签与 Emmet | 输入模板开始标签后补闭合标签；原生 Emmet 未映射到 Vue 时，由 VueClick 提供 HTML/CSS/SCSS/Less 缩写 |
+| 整文件格式化 | 一次格式化模板、JS/TS 脚本和 CSS/SCSS/Less；遵循编辑器格式选项，支持关闭并交给外部格式器 |
 
 Vue/TypeScript 语义服务在独立工作线程内运行，使用仍支持 Vue 2 的语言核心。首次项目分析有冷启动成本，随后复用文档快照与类型程序。项目依赖中的 Vue 类型需要已安装；动态注入或未声明的第三方类型无法凭空获得准确类型。静态关系追踪补充定义与补全，不把运行时事件名、Vuex 字符串协议自动当作安全重命名范围。
 
 JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位的本地和静态导入声明仍可显示注释；不依赖内置 JS/TS 悬停是否命中。
+
+组件契约元数据读取当前组件的静态声明，支持同文件以及直接导入的类型/接口、`extends` / `mixins`、运行时 `validator: value => ['a', 'b'].includes(value)` 和 `@type` 字面量联合；不执行验证函数。用户可在项目 `package.json` 的 `vetur.tags` / `vetur.attributes` 指向现有 JSON 元数据，VueClick 会读取它作为常用库的补全与悬停来源。Element UI 2 提供常见 button、input、select、option、dialog、table、form、pagination 的基础契约；Vue Router 3 提供 `router-link` / `router-view`。按项目实际安装版本启用；不提供 Element UI 全量 API 或其他库的大型内置版本表，也不会猜动态插件注册。
 
 ## 高亮与基础编辑
 
@@ -47,16 +56,16 @@ JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位�
 - `this.` 和直接的 `this` 别名后，提示当前组件明确声明的 `data`、`props`、`computed`、`methods` 及 `setup()` 返回成员；嵌套普通函数或对象中的 `this` 不借用外层组件成员。
 - 模板插值和指令表达式中提示组件成员及 `v-for` / 插槽局部变量；局部变量优先。`user.` 等深层对象属性不做类型推断。
 - 输入组件标签时，提示 `components` 中直接注册的组件；`<script setup>` 中直接导入的 `.vue` 组件也支持。
-- 已注册组件的属性位置提示子组件直接声明的 props，使用短横线名称，保留已有的 `:`，过滤已经填写的属性。可读取对象、字符串数组和本文件直接 `defineProps` 类型声明，使用未保存的编辑器内容。
+- 已注册组件的属性位置提示子组件 props，使用短横线名称，保留已有的 `:`，过滤已经填写的属性。可读取运行时对象/字符串数组、同文件或直接导入的 `defineProps` 类型声明，使用未保存的编辑器内容。
 - 快速补全与本地跳转复用文档版本缓存；项目类型能力由工作线程补充，可独立关闭。
 
 快速补全支持 Vue 文件及设为 Vue 的未命名文件；未命名文件不解析跨文件 props，也不建立项目类型服务。前述 `user.` 深层对象属性等能力由开启的项目语言服务补充。
 
 ## 独立安装与设置
 
-通过 VS Code 扩展面板的「从 VSIX 安装」选择 `vueClick-0.3.0.vsix`，重新加载窗口后即可使用。仅依赖 VS Code 自带的基础语法，不需要安装 Vetur 或 Vue - Official。若原来安装过其他 Vue 语言扩展，在当前工作区禁用后重新加载窗口，即可独立使用本扩展。
+通过 VS Code 扩展面板的「从 VSIX 安装」选择 `vueClick-0.16.0.vsix`，重新加载窗口后即可使用。仅依赖 VS Code 自带的基础语法，不需要安装 Vetur 或 Vue - Official。若原来安装过其他 Vue 语言扩展，在当前工作区禁用后重新加载窗口，即可独立使用本扩展。
 
-各项能力默认开启；可按工作区调整：
+定义跳转、补全、片段和交互式语言服务默认开启。项目诊断默认关闭，避免打开 Vue 文件时自动冷启动整项目分析；需要自动诊断时可按工作区开启：
 
 ```json
 {
@@ -64,15 +73,17 @@ JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位�
   "vueClick.completion.enabled": true,
   "vueClick.snippets.enabled": true,
   "vueClick.languageService.enabled": true,
-  "vueClick.diagnostics.enabled": true
+  "vueClick.diagnostics.enabled": false,
+  "vueClick.formatting.enabled": true,
+  "vueClick.autoClosingTags.enabled": true
 }
 ```
 
-设置即时生效。关闭 `languageService.enabled` 可停用项目语义能力，保留快速跳转、片段、静态注释回退和 HTML/CSS 服务。`diagnostics.enabled` 控制问题面板诊断。保留标准 `vue` 语言 ID，不修改其他扩展或用户编辑器的设置。
+设置即时生效。`diagnostics.enabled` 默认关闭；只有显式开启时，活动 Vue 文档才会在打开或编辑后防抖执行项目诊断。**VueClick: 检查当前文件**始终可单次执行检查，检查后不会改变自动诊断开关。悬停、补全等交互能力仍在实际请求时启动语言服务。关闭 `languageService.enabled` 可停用项目语义能力，保留快速跳转、片段、静态注释回退和 HTML/CSS 服务。`formatting.enabled` 关闭时不提供整文件格式化，以便由 Prettier 等外部工具接管。标签闭合遵循 `html.autoClosingTags`；开启原生 `emmet.includeLanguages.vue` → `html` 时 VueClick 不再重复提供 Emmet。保留标准 `vue` 语言 ID，不修改其他扩展或用户编辑器的设置。
 
 扩展入口与语言工作线程均以 CommonJS 打包，使用宿主提供的 `require('vscode')`，没有声明 `"type": "module"`。构建检查会实际加载入口、检查提供者注册，并启动打包后的工作线程验证 Vue 2 类型与随包 TypeScript 标准库。历史宿主验证与当前版本验证记录见 [验证记录](docs/lightweight-validation.md)。
 
-模板语法适配自 Vetur v0.37.3，来源与许可见 [ThirdPartyNotices.txt](ThirdPartyNotices.txt)。语义能力复用 Vue language-core / Volar / TypeScript；HTML/CSS 使用对应语言服务，没有移植 Vetur 的整套服务器。
+模板语法适配自 Vetur v0.37.3，来源与许可见 [ThirdPartyNotices.txt](ThirdPartyNotices.txt)。语义能力复用 Vue language-core / Volar / TypeScript；HTML/CSS 使用对应语言服务，没有移植 Vetur 的整套服务器。打包依赖的许可证通知随构建生成于 `dist/ThirdPartyNotices.txt`。
 
 ## 用法
 
@@ -191,7 +202,7 @@ methods: {
 
 文件索引按文档版本复用，修改或关闭文档后失效。模板表达式只在查询时解析，同一版本内相同的表达式共享语法树，各自保留原文件偏移和模板作用域。索引缓存按最近使用顺序淘汰，最多保留 32 个文档及 400 万源码字符；这是缓存容量限制，并非实际堆内存上限。
 
-快速跨文件查询在单次请求中共享配置读取、文件存在性检查及文档加载；并发请求合并相同文件的在途读取。项目语言服务保留一个活跃项目工作线程，切换项目时释放旧线程，文档按版本增量发送；打开文件的未保存内容优先，文件与配置变更通知会使相关状态失效。诊断在活动 Vue 文档中防抖刷新，后台文件不抢占交互请求所在的项目。项目分析需要额外内存，原有轻量路径的缓存上限不代表新类型服务的内存上限。
+快速跨文件查询在单次请求中共享配置读取、文件存在性检查及文档加载；并发请求合并相同文件的在途读取。项目语言服务保留一个活跃项目工作线程，切换项目时释放旧线程，文档按版本增量发送；打开文件的未保存内容优先，文件与配置变更通知会使相关状态失效。诊断默认关闭；开启后只在活动 Vue 文档中防抖刷新，后台文件不抢占交互请求所在的项目。脚本折叠/高亮/选区与模板编辑增强按编辑器功能请求当前文档，不建立开页全项目扫描。工作线程一次处理一个请求，已取消且尚未开始的请求会从队列移除。项目分析需要额外内存，原有轻量路径的缓存上限不代表新类型服务的内存上限。
 
 运行 `npm run benchmark` 查看索引构建、重复查询和跨文件读取次数；`npm run benchmark -- --json` 输出完整数据。没有原始业务项目时使用合成文件，也可通过 `BENCH_PROJECT_ROOT` 指定业务项目。该基准不包含 VS Code UI、其他语言插件和扩展启动时间；跨文件基准中的请求级缓存对照不包含扩展的并发请求合并。测试通过操作次数和作用域验证复用行为，不使用机器相关的耗时阈值。
 

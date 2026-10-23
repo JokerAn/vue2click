@@ -16,7 +16,9 @@ let vscodeLoads = 0
 const registrations = []
 const disposable = () => ({ dispose() {} })
 const host = {
-  window: { onDidChangeActiveTextEditor: disposable },
+  commands: { registerCommand: disposable },
+  CodeActionKind: { QuickFix: {}, SourceOrganizeImports: {}, Source: { append: () => ({}) } },
+  window: { onDidChangeActiveTextEditor: disposable, onDidChangeTextEditorSelection: disposable },
   languages: {
     registerDefinitionProvider(selector, provider) {
       assert.equal(typeof provider.provideDefinition, 'function')
@@ -31,7 +33,7 @@ const host = {
     ...Object.fromEntries([
       'DocumentSymbol', 'Hover', 'SignatureHelp', 'Reference', 'Rename',
       'DocumentFormattingEdit', 'Color', 'LinkedEditingRange',
-      'DocumentLink', 'DocumentHighlight', 'FoldingRange', 'SelectionRange'
+      'DocumentLink', 'DocumentHighlight', 'FoldingRange', 'SelectionRange', 'CodeActions'
     ].map(name => [`register${name}Provider`, () => { registrations.push(name); return disposable() }])),
     createDiagnosticCollection: () => ({ ...disposable(), delete() {} })
   },
@@ -65,7 +67,7 @@ entry.exports.activate(context)
 assert.deepEqual(registrations.sort(), [
   'DocumentSymbol', 'Hover', 'SignatureHelp', 'Reference', 'Rename',
   'DocumentFormattingEdit', 'Color', 'LinkedEditingRange',
-  'DocumentLink', 'DocumentHighlight', 'FoldingRange', 'SelectionRange',
+  'DocumentLink', 'DocumentHighlight', 'FoldingRange', 'SelectionRange', 'CodeActions',
   'close', 'close', 'completion', 'completion', 'definition'
 ].sort())
 for (const subscription of context.subscriptions) {

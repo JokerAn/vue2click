@@ -143,6 +143,11 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
     return null
   }
   return {
+    async componentInfo(index, tag) {
+      const globals = await registry()
+      const child = await component(index, tag, globals)
+      return child ? require('./component-info').describeComponent(child.index, child.options, context()) : null
+    },
     async definitions(index, offset) {
       const globals = await registry()
       const reference = index.templateReferences.find(value => offset >= value.start && offset < value.end)
