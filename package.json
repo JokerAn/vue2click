@@ -1,9 +1,9 @@
 {
   "name": "vueClick",
   "displayName": "vueClick",
-  "description": "vue点击变量或函数名称，快速跳转到定义的位置",
+  "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.1.5",
+  "version": "0.3.0",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
@@ -25,20 +25,124 @@
     "onLanguage:typescript",
     "onLanguage:typescriptreact"
   ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "vue",
+        "aliases": [
+          "Vue",
+          "vue"
+        ],
+        "extensions": [
+          ".vue"
+        ],
+        "configuration": "./languages/vue-language-configuration.json"
+      },
+      {
+        "id": "vueclick-html",
+        "aliases": [
+          "VueClick HTML"
+        ],
+        "configuration": "./languages/vue-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vue",
+        "scopeName": "source.vue",
+        "path": "./syntaxes/vue.tmLanguage.json",
+        "embeddedLanguages": {
+          "text.html.vueclick": "vueclick-html",
+          "source.js": "javascript",
+          "source.js.jsx": "javascriptreact",
+          "source.ts": "typescript",
+          "source.tsx": "typescriptreact",
+          "source.css": "css",
+          "source.css.scss": "scss",
+          "source.css.less": "less",
+          "text.pug": "jade",
+          "source.directive.vue": "javascript",
+          "expression.embedded.vue": "javascript",
+          "source.sass": "sass",
+          "source.stylus": "stylus"
+        },
+        "tokenTypes": {
+          "source.directive.vue": "other",
+          "expression.embedded.vue": "other"
+        }
+      },
+      {
+        "language": "vueclick-html",
+        "scopeName": "text.html.vueclick",
+        "path": "./syntaxes/vue-html.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.directive.vue": "javascript",
+          "expression.embedded.vue": "javascript"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "VueClick",
+      "properties": {
+        "vueClick.languageService.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "启用独立工作线程中的 Vue/TypeScript 语言服务，提供类型补全、悬停、参数、引用和语义重命名。"
+        },
+        "vueClick.diagnostics.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "显示 Vue 脚本、模板及 CSS/SCSS/Less 诊断，遵循项目的 jsconfig/tsconfig。"
+        },
+        "vueClick.definition.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "提供 VueClick 定义跳转。"
+        },
+        "vueClick.completion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "提供 Vue 成员、组件、props 及语言服务的类型补全与自动导入。"
+        },
+        "vueClick.snippets.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "在 Vue 文件的相应位置提供 Vue 2 组件、选项和模板指令片段。"
+        }
+      }
+    }
+  },
   "scripts": {
     "test": "node --test test/*.test.js",
+    "test:vscode": "node scripts/test-vscode.js",
     "benchmark": "node scripts/benchmark.js",
-    "build": "esbuild src/extension.js --bundle --platform=node --target=node18 --external:vscode --minify --outfile=dist/extension.js",
+    "benchmark:file": "node scripts/benchmark-file.js",
+    "build": "node scripts/build.js && node scripts/check-bundle.js && node scripts/check-worker.js",
     "package": "npm run test && npm run build && vsce package --no-dependencies",
     "release": "npm run test && npm run build && vsce publish --no-dependencies",
     "publish:vsix": "vsce publish --no-dependencies --packagePath"
   },
   "devDependencies": {
+    "@volar/typescript": "2.4.23",
+    "@vscode/test-electron": "2.5.2",
     "@vscode/vsce": "^3.6.0",
     "@vue/compiler-dom": "^3.5.43",
+    "@vue/language-core": "3.0.11",
     "@vue/shared": "^3.5.43",
     "entities": "^7.0.1",
     "esbuild": "^0.25.0",
-    "typescript": "~5.9.0"
+    "ignore": "7.0.10",
+    "typescript": "~5.9.0",
+    "vscode-css-languageservice": "6.3.10",
+    "vscode-html-languageservice": "5.6.2",
+    "vscode-languageserver-textdocument": "1.0.12",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.2.0",
+    "vue": "2.7.16"
   }
 }

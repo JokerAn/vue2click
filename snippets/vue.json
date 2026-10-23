@@ -1,0 +1,111 @@
+{
+  "Vue 2 component": {
+    "prefix": ["vbase", "vue2"],
+    "context": "root",
+    "body": [
+      "<template>",
+      "  <div class=\"${1:component}\">",
+      "    $0",
+      "  </div>",
+      "</template>",
+      "",
+      "<script>",
+      "export default {",
+      "  name: '${2:ComponentName}',",
+      "  data() {",
+      "    return {}",
+      "  },",
+      "  methods: {}",
+      "}",
+      "</script>",
+      "",
+      "<style scoped>",
+      "</style>"
+    ],
+    "description": "Vue 2 Options API 单文件组件"
+  },
+  "Vue data": {
+    "prefix": "vdata",
+    "context": "script",
+    "body": ["data() {", "  return {", "    $0", "  }", "},"],
+    "description": "data 返回对象"
+  },
+  "Vue methods": {
+    "prefix": "vmethods",
+    "context": "script",
+    "body": ["methods: {", "  ${1:methodName}() {", "    $0", "  }", "},"],
+    "description": "methods 方法"
+  },
+  "Vue computed": {
+    "prefix": "vcomputed",
+    "context": "script",
+    "body": ["computed: {", "  ${1:computedName}() {", "    return $0", "  }", "},"],
+    "description": "computed 计算属性"
+  },
+  "Vue watch": {
+    "prefix": "vwatch",
+    "context": "script",
+    "body": ["watch: {", "  ${1:property}: {", "    handler(value, oldValue) {", "      $0", "    },", "    immediate: ${2:false}", "  }", "},"],
+    "description": "watch 监听器"
+  },
+  "Vue props": {
+    "prefix": "vprops",
+    "context": "script",
+    "body": ["props: {", "  ${1:propName}: {", "    type: ${2:String},", "    default: ${3:''}", "  }", "},"],
+    "description": "props 声明"
+  },
+  "Vue mounted": {
+    "prefix": "vmounted",
+    "context": "script",
+    "body": ["mounted() {", "  $0", "},"],
+    "description": "mounted 生命周期"
+  },
+  "Vue created": {
+    "prefix": "vcreated",
+    "context": "script",
+    "body": ["created() {", "  $0", "},"],
+    "description": "created 生命周期"
+  },
+  "Vue if": {
+    "prefix": "vif",
+    "context": "attribute",
+    "body": "v-if=\"${1:condition}\"",
+    "description": "条件渲染"
+  },
+  "Vue else": {
+    "prefix": "velse",
+    "context": "attribute",
+    "body": "v-else",
+    "description": "条件分支"
+  },
+  "Vue for": {
+    "prefix": "vfor",
+    "context": "attribute",
+    "body": "v-for=\"(${1:item}, ${2:index}) in ${3:items}\" :key=\"${1:item}.${4:id}\"",
+    "description": "列表渲染与 key"
+  },
+  "Vue model": {
+    "prefix": "vmodel",
+    "context": "attribute",
+    "body": "v-model=\"${1:value}\"",
+    "description": "双向绑定"
+  },
+  "Vue bind": {
+    "prefix": "vbind",
+    "context": "attribute",
+    "body": ":${1:prop}=\"${2:value}\"",
+    "description": "动态属性"
+  },
+  "Vue event": {
+    "prefix": "von",
+    "context": "attribute",
+    "body": "@${1:click}=\"${2:handler}\"",
+    "description": "事件绑定"
+  },
+  "Vue slot": {
+    "prefix": "vslot",
+    "context": "attribute",
+    "body": "v-slot:${1:default}=\"${2:slotProps}\"",
+    "description": "具名作用域插槽（Vue 2.6+）"
+  }
+}

@@ -12,7 +12,7 @@ function document(fileName, initialText, version = 1) {
   let text = initialText
   return {
     fileName, version, languageId: 'vue', textReads: 0,
-    uri: { fsPath: fileName, toString: () => 'file://' + fileName },
+    uri: { scheme: 'file', fsPath: fileName, toString: () => 'file://' + fileName },
     getText() { this.textReads++; return text },
     update(next) { text = next; this.version++ },
     offsetAt(position) {
@@ -40,15 +40,22 @@ export default { components: { AddressTab }, data() { return { addressParams: {}
   const closeHandlers = []
   const calls = { opens: 0, resolutions: 0 }
   let provider
+  let completionProvider
+  const settings = {}
   let onOpen
   const vscode = {
     Uri: { file: fileName => ({ fsPath: fileName, toString: () => 'file://' + fileName }) },
     Range: class { constructor(start, end) { this.start = start; this.end = end } },
     Location: class { constructor(uri, range) { this.uri = uri; this.range = range } },
+    CompletionItem: class { constructor(label, kind) { this.label = label; this.kind = kind } },
+    CompletionItemKind: { Method: 1, Property: 2, Variable: 3, Class: 4, Snippet: 5 },
+    SnippetString: class { constructor(value) { this.value = value } },
     languages: {
-      registerDefinitionProvider(selector, registered) { provider = registered; return { dispose() {} } }
+      registerDefinitionProvider(selector, registered) { provider = registered; return { dispose() {} } },
+      registerCompletionItemProvider(selector, registered) { completionProvider = registered; return { dispose() {} } }
     },
     workspace: {
+      getConfiguration: () => ({ get: (name, fallback) => settings[name] ?? fallback }),
       getWorkspaceFolder: () => ({ uri: { fsPath: directory } }),
       async openTextDocument(uri) {
         calls.opens++
@@ -68,6 +75,9 @@ export default { components: { AddressTab }, data() { return { addressParams: {}
     delete require.cache[extensionFile]
     Module._load = function(request, parentModule, isMain) {
       if (request === 'vscode') return vscode
+      if (request === './advanced' && parentModule?.filename === extensionFile) {
+        return { registerAdvanced: () => ({ definitions: async () => [] }) }
+      }
       if (request === './module-paths' && parentModule?.filename === extensionFile) {
         return { createModuleResolver(options) {
           const resolve = createModuleResolver(options)
@@ -89,9 +99,21 @@ export default { components: { AddressTab }, data() { return { addressParams: {}
     fs.rmSync(directory, { recursive: true, force: true })
   })
   return {
-    parent, parentText, childFile, documents, calls,
+    parent, parentText, childFile, documents, calls, settings,
     close: doc => closeHandlers.forEach(handler => handler(doc)),
     onOpen: callback => { onOpen = callback },
+    definition(text, reference, token = { isCancellationRequested: false }) {
+      parent.update(text)
+      const offset = text.indexOf(reference)
+      assert.ok(offset >= 0, 'missing reference: ' + reference)
+      return provider.provideDefinition(parent, parent.positionAt(offset + 1), token)
+    },
+    async complete(text, token = { isCancellationRequested: false }) {
+      const offset = text.indexOf('|')
+      assert.ok(offset >= 0)
+      parent.update(text.replace('|', ''))
+      return completionProvider.provideCompletionItems(parent, parent.positionAt(offset), token)
+    },
     query(reference = 'address-params', token = { isCancellationRequested: false }) {
       const offset = parentText.indexOf(reference)
       assert.ok(offset >= 0, 'missing reference')
@@ -297,4 +319,117 @@ test('shared barrel branches open each participating document once per request',
   assertPropLocation(await h.query(), child, text)
   assert.equal(h.calls.opens, 4, 'the shared child should be opened once, alongside three distinct barrel files')
   assert.equal(child.textReads, 1)
+})
+
+test('completion uses unsaved child props and keeps exact attribute replacement ranges', async t => {
+  const h = harness(t)
+  const child = document(h.childFile, `<script>export default { props: { addressParams: Object, visible: Boolean } }</script>`)
+  h.documents.set(h.childFile, child)
+  const source = h.parentText.replace(':address-params="addressParams"', ':addr|ess')
+  let items = await h.complete(source)
+  const prop = items.find(item => item.label === 'address-params')
+  assert.ok(prop)
+  assert.deepEqual(prop.range.start, h.parent.positionAt(source.indexOf('addr')))
+  assert.deepEqual(prop.range.end, h.parent.positionAt(source.indexOf('addr') + 'address'.length))
+  child.update(`<script>export default { props: ['nextValue'] }</script>`)
+  items = await h.complete(source)
+  assert.ok(items.some(item => item.label === 'next-value'))
+  assert.ok(!items.some(item => item.label === 'address-params'))
+})
+
+test('completion settings can independently disable members and snippets without file reads', async t => {
+  const h = harness(t)
+  h.settings['completion.enabled'] = false
+  const snippets = await h.complete('vba|se')
+  assert.ok(snippets.some(item => item.label === 'vbase' && item.insertText.value.includes('<template>')))
+  assert.deepEqual(h.calls, { opens: 0, resolutions: 0 })
+  const textReads = h.parent.textReads
+  h.settings['snippets.enabled'] = false
+  assert.equal(await h.complete('vba|se'), undefined)
+  assert.equal(h.parent.textReads, textReads, 'disabled features must not build an index')
+})
+
+test('definition can be disabled without indexing or filesystem work', async t => {
+  const h = harness(t)
+  h.settings['definition.enabled'] = false
+  assert.equal(await h.query('gotoPage(1)'), undefined)
+  assert.equal(h.parent.textReads, 0)
+  assert.deepEqual(h.calls, { opens: 0, resolutions: 0 })
+})
+
+test('named function imports resolve their actual definition using aliases and current editor contents', async t => {
+  const h = harness(t)
+  const root = path.dirname(h.childFile)
+  fs.mkdirSync(path.join(root, 'src/config'), { recursive: true })
+  const target = path.join(root, 'src/config/mUtils.js')
+  const text = 'export function sgmCodeF(obj) { return obj }'
+  fs.writeFileSync(target, text)
+  const source = document(target, text)
+  source.languageId = 'javascript'
+  h.documents.set(target, source)
+  const parent = `<script>import { sgmCodeF } from '@/config/mUtils.js'; export default { methods: { run() { sgmCodeF({}) } } }</script>`
+  let hit = await h.definition(parent, 'sgmCodeF({')
+  assert.ok(hit, 'imported functions must resolve without another Vue language extension')
+  assert.equal(hit.uri.fsPath, target)
+  assert.deepEqual(hit.range.start, source.positionAt(text.indexOf('sgmCodeF')))
+  source.update('\n// latest unsaved version\n' + text)
+  hit = await h.definition(parent, 'sgmCodeF({')
+  assert.deepEqual(hit.range.start, source.positionAt(('\n// latest unsaved version\n' + text).indexOf('sgmCodeF')))
+  assert.deepEqual(hit.range.end, source.positionAt(('\n// latest unsaved version\n' + text).indexOf('sgmCodeF') + 8))
+})
+
+test('import navigation discards cancellation and parent edits during a target document load', async t => {
+  const h = harness(t)
+  const target = path.join(path.dirname(h.childFile), 'utils.js')
+  const targetText = 'export function report() {}'
+  fs.writeFileSync(target, targetText)
+  const child = document(target, targetText)
+  child.languageId = 'javascript'
+  h.documents.set(target, child)
+  const source = `<script>import { report } from './utils'; report()</script>`
+  for (const invalidate of ['cancel', 'parent edit']) {
+    let entered
+    let release
+    const started = new Promise(resolve => { entered = resolve })
+    const paused = new Promise(resolve => { release = resolve })
+    h.onOpen(() => { entered(); return paused })
+    const token = { isCancellationRequested: false }
+    const pending = h.definition(source, 'report()', token)
+    await started
+    if (invalidate === 'cancel') {
+      token.isCancellationRequested = true
+    } else {
+      h.parent.update(source + '\n<!-- newer version -->')
+    }
+    release()
+    assert.equal(await pending, undefined, invalidate)
+  }
+  h.onOpen(undefined)
+  const hit = await h.definition(source, 'report()')
+  assert.equal(hit.uri.fsPath, target, 'a later request must recover after invalidation')
+})
+
+test('cancelled and stale prop completion requests do not publish their items', async t => {
+  const h = harness(t)
+  h.documents.set(h.childFile, document(h.childFile, `<script>export default { props: ['addressParams'] }</script>`))
+  const source = h.parentText.replace(':address-params="addressParams"', ':addr|ess')
+  assert.equal(await h.complete(source, { isCancellationRequested: true }), undefined)
+  assert.equal(h.calls.opens, 0)
+  for (const invalidate of ['cancel', 'edit']) {
+    let entered
+    let resume
+    const started = new Promise(resolve => { entered = resolve })
+    const paused = new Promise(resolve => { resume = resolve })
+    h.onOpen(() => { entered(); return paused })
+    const token = { isCancellationRequested: false }
+    const pending = h.complete(source, token)
+    await started
+    if (invalidate === 'cancel') {
+      token.isCancellationRequested = true
+    } else {
+      h.parent.update('<template />')
+    }
+    resume()
+    assert.equal(await pending, undefined)
+  }
 })

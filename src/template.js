@@ -33,30 +33,64 @@ function expressionSource(raw, attribute) {
   return { text, toSource, fromSource }
 }
 
-function bindingNames(pattern) {
+function bindingDeclarations(pattern, start) {
+  const decoded = expressionSource(pattern, true)
+  pattern = decoded.text
   const root = ts.createSourceFile('slot.js', `(${pattern}) => {}`, ts.ScriptTarget.Latest, true)
   const names = []
   function collect(name) {
-    if (ts.isIdentifier(name)) names.push(name.text)
-    else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
-      for (const element of name.elements) if (ts.isBindingElement(element)) collect(element.name)
+    if (ts.isIdentifier(name)) {
+      names.push([name.text, {
+        start: start + decoded.toSource[name.getStart(root) - 1],
+        end: start + decoded.toSource[name.end - 1]
+      }])
+    } else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) {
+          collect(element.name)
+        }
+      }
     }
   }
   const arrow = root.statements[0]?.expression
-  if (arrow && ts.isArrowFunction(arrow)) for (const param of arrow.parameters) collect(param.name)
+  if (arrow && ts.isArrowFunction(arrow)) {
+    for (const param of arrow.parameters) {
+      collect(param.name)
+    }
+  }
   return names
 }
 
 function buildTemplateIndex(text, buildExpressionIndex) {
   const expressions = []
   const references = []
+  const blocks = []
+  const tags = []
+  const texts = []
   // Identical expressions use the same syntax tree within this document
   // version. Their Vue offsets and template-local scopes remain separate.
   const expressionIndexes = new Map()
-  const result = { expressions, references }
+  const result = { expressions, references, blocks, tags, texts }
   // Recover from unfinished markup while the user is typing.
   let root
   try { root = parse(text, { onError() {} }) } catch { return result }
+  for (const node of root.children) {
+    if (node.type !== NodeTypes.ELEMENT) {
+      continue
+    }
+    const opening = node.loc.source.match(/^<[\w-]+\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/)
+    if (!opening || node.isSelfClosing) {
+      continue
+    }
+    const lang = node.props.find(prop => prop.type === NodeTypes.ATTRIBUTE && prop.name === 'lang')
+    const external = node.props.some(prop => prop.type === NodeTypes.ATTRIBUTE && prop.name === 'src')
+    const close = node.loc.source.lastIndexOf(`</${node.tag}`)
+    blocks.push({
+      tag: node.tag, lang: lang?.value?.content, external,
+      start: node.loc.start.offset + opening[0].length,
+      end: close >= opening[0].length ? node.loc.start.offset + close : node.loc.end.offset
+    })
+  }
   const template = root.children.find(node => node.type === NodeTypes.ELEMENT && node.tag === 'template')
   if (!template || template.props.some(prop => prop.type === NodeTypes.ATTRIBUTE &&
     (prop.name === 'src' || (prop.name === 'lang' && prop.value?.content !== 'html')))) return result
@@ -69,7 +103,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     const prefix = statements ? '{' : '('
     const suffix = statements ? '\n}' : '\n)'
     expressions.push({ start: exp.loc.start.offset, end: exp.loc.end.offset,
-      locals, prefix: prefix.length,
+      locals: new Set(locals.keys()), localDefinitions: locals, prefix: prefix.length,
       get source() { return source ||= expressionSource(raw, attribute) },
       get index() {
         const text = prefix + this.source.text + suffix
@@ -81,7 +115,23 @@ function buildTemplateIndex(text, buildExpressionIndex) {
 
   function walk(node, inherited, literal = false) {
     if (node.type === NodeTypes.INTERPOLATION) {
-      add(node.content, inherited, false, false)
+      const start = node.loc.start.offset + 2
+      const end = node.loc.end.offset - 2
+      add({ isStatic: false, loc: { start: { offset: start }, end: { offset: end },
+        source: text.slice(start, end) } }, inherited, false, false)
+      return
+    }
+    if (node.type === NodeTypes.TEXT && !literal) {
+      texts.push({ start: node.loc.start.offset, end: node.loc.end.offset })
+      // The compiler represents an unfinished interpolation as plain text.
+      // Recover only up to the next tag so suggestions cannot spill into markup.
+      const match = /\{\{([^<]*?)$/.exec(node.loc.source.split('<')[0])
+      if (match) {
+        const start = node.loc.start.offset + match.index + 2
+        const end = start + match[1].length
+        add({ isStatic: false, loc: { start: { offset: start }, end: { offset: end },
+          source: match[1] } }, inherited, false, false)
+      }
       return
     }
     if (node.type !== NodeTypes.ELEMENT) return
@@ -90,10 +140,25 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     literal ||= Boolean(opening && [...opening[1].matchAll(/\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/g)]
       .some(match => match[1] === 'v-pre'))
     if (literal) return
-    const dynamicComponent = node.props.some(prop =>
+    const dynamicProps = node.props.filter(prop =>
       (prop.type === NodeTypes.ATTRIBUTE && prop.name === 'is') ||
       (prop.type === NodeTypes.DIRECTIVE && prop.name === 'bind' &&
         (!prop.arg || !prop.arg.isStatic || prop.arg.content === 'is')))
+    const dynamicComponent = dynamicProps.length > 0
+    if (node !== template) {
+      tags.push({
+        tag: node.tag,
+        // A bare `:` is an unfinished prop name, not an object v-bind.
+        dynamic: dynamicProps.some(prop => prop.rawName !== ':' || prop.exp),
+        start: node.loc.start.offset,
+        end: opening ? node.loc.start.offset + opening[0].length : node.loc.end.offset,
+        attributes: node.props.map(prop => ({
+          start: prop.loc.start.offset, end: prop.loc.end.offset,
+          name: prop.type === NodeTypes.ATTRIBUTE ? prop.name : prop.arg?.content,
+          value: prop.type === NodeTypes.ATTRIBUTE ? prop.value?.content : undefined
+        }))
+      })
+    }
     if (node !== template && !dynamicComponent) {
       references.push({ kind: 'component', tag: node.tag, start: node.loc.start.offset + 1,
         end: node.loc.start.offset + 1 + node.tag.length })
@@ -116,6 +181,10 @@ function buildTemplateIndex(text, buildExpressionIndex) {
         }
         if (loc) references.push({ kind: 'prop', tag: node.tag, name,
           start: loc.start.offset, end: loc.end.offset })
+        if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'on' && prop.arg?.isStatic) {
+          references.push({ kind: 'event', tag: node.tag, name: prop.arg.content,
+            start: prop.arg.loc.start.offset, end: prop.arg.loc.end.offset })
+        }
         if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'model' && (!prop.arg || prop.arg.isStatic)) {
           const loc = prop.arg?.loc
           references.push({ kind: 'model', tag: node.tag, name: prop.arg?.content,
@@ -124,20 +193,30 @@ function buildTemplateIndex(text, buildExpressionIndex) {
         }
       }
     }
-    const locals = new Set(inherited)
+    const locals = new Map(inherited)
     for (const prop of node.props) {
       if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'for') {
         const loop = prop.forParseResult
         if (loop) {
           add(loop.source, inherited)
           for (const alias of [loop.value, loop.key, loop.index]) {
-            if (alias) for (const name of bindingNames(alias.content)) locals.add(name)
+            if (alias) {
+              for (const [name, declaration] of bindingDeclarations(alias.loc.source, alias.loc.start.offset)) {
+                locals.set(name, declaration)
+              }
+            }
           }
         }
       } else if (prop.type === NodeTypes.DIRECTIVE && prop.name === 'slot' && prop.exp) {
-        for (const name of bindingNames(prop.exp.content)) locals.add(name)
+        for (const [name, declaration] of bindingDeclarations(prop.exp.loc.source, prop.exp.loc.start.offset)) {
+          locals.set(name, declaration)
+        }
       } else if (prop.type === NodeTypes.ATTRIBUTE && ['slot-scope', 'scope'].includes(prop.name) && prop.value) {
-        for (const name of bindingNames(prop.value.content)) locals.add(name)
+        const quoted = /^["']/.test(prop.value.loc.source)
+        const raw = quoted ? prop.value.loc.source.slice(1, -1) : prop.value.loc.source
+        for (const [name, declaration] of bindingDeclarations(raw, prop.value.loc.start.offset + Number(quoted))) {
+          locals.set(name, declaration)
+        }
       }
     }
     for (const prop of node.props) {
@@ -145,11 +224,11 @@ function buildTemplateIndex(text, buildExpressionIndex) {
       add(prop.arg, locals)
       if (['for', 'slot'].includes(prop.name)) continue
       const event = prop.name === 'on' && Boolean(prop.arg)
-      add(prop.exp, event ? new Set([...locals, '$event']) : locals, event)
+      add(prop.exp, event ? new Map([...locals, ['$event', null]]) : locals, event)
     }
     for (const child of node.children) walk(child, locals, literal)
   }
-  walk(template, new Set())
+  walk(template, new Map())
   return result
 }
 

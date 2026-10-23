@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { buildIndex, findDefinition } = require('../src/resolver')
-const { findComponentDefinition } = require('../src/components')
+const { findComponentDefinition, componentProps } = require('../src/components')
 
 const parentFile = '/project/src/Parent.vue'
 const childFile = '/project/src/AddressTab.vue'
@@ -59,6 +59,25 @@ function assertProp(f, hit, name, expectedFile = childFile) {
   assert.equal(text.slice(hit.start, hit.end).replace(/^['"]|['"]$/g, ''), name)
   assert.ok(hit.start === text.indexOf(name) || hit.start === text.indexOf(name) - 1, 'must target the prop declaration')
 }
+
+test('prop completion reads static runtime declarations and local script-setup types', async () => {
+  const parent = `<script>import AddressTab from './AddressTab.vue'; export default { components: { AddressTab } }</script>`
+  for (const [child, expected] of [
+    [objectProps, ['addressParams', 'bookTimeData', 'result', 'title']],
+    [`<script>export default { props: ['addressParams', 'title'] }</script>`, ['addressParams', 'title']],
+    [`<script>const props = { title: String }; export default { props }</script>`, ['title']],
+    [`<script setup lang="ts">interface Props { title: string; count?: number }; defineProps<Props>()</script>`, ['title', 'count']],
+    [`<script setup lang="ts">type Props = { title: string }; defineProps<Props>()</script>`, ['title']],
+    [`<script setup>defineProps({ title: String })</script>`, ['title']],
+    [`<script setup lang="ts">import type { Props } from './types'; defineProps<Props>()</script>`, []]
+  ]) {
+    const f = fixture(parent, child)
+    assert.deepEqual(await componentProps(f.index, 'AddressTab', f.options), expected, child)
+  }
+  const f = fixture(parent)
+  assert.deepEqual(await componentProps(f.index, 'AddressTab', { ...f.options, isCancelled: () => true }), [])
+  assert.deepEqual(await componentProps(f.index, 'Unknown', f.options), [])
+})
 
 test('registered component tags resolve opening, closing and kebab-case spelling', async () => {
   for (const registration of ['AddressTab', 'AddressTab: ImportedTab', "'AddressTab': ImportedTab"]) {

@@ -7,3 +7,9 @@ docs/**
 *.vsix
 .gitignore
 package-lock.json
+.vscode-test/**
+.joycode/**
+.agent/**
+.agent-teams/**
+.vsce_pat
+.DS_Store

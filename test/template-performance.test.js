@@ -37,7 +37,8 @@ test('shared expression trees keep per-occurrence source offsets and template lo
   const index = buildIndex(source, 'vue')
   const itemReferences = [...source.matchAll(/\{\{ item \}\}/g)]
   assert.equal(findDefinition(index, itemReferences[0].index + 4)?.start, source.indexOf('item: 1'))
-  assert.equal(findDefinition(index, itemReferences[1].index + 4), null, 'v-for alias must not resolve to a component field')
+  assert.equal(findDefinition(index, itemReferences[1].index + 4)?.start, source.indexOf('item in items'),
+    'v-for alias must resolve to its own declaration')
   const repeated = index.templates.filter(exp => source.slice(exp.start, exp.end).trim() === 'item')
   assert.equal(repeated[0].index, repeated[1].index)
   for (const match of source.matchAll(/gotoPage\(1\)/g)) {

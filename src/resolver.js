@@ -32,6 +32,7 @@ function buildIndex(text, language, fileName = 'untitled.js') {
   const bindings = []
   const options = []
   const thisAssignments = []
+  const imports = []
   const pushBinding = (name, scope, isThisAlias = false) => {
     if (ts.isIdentifier(name)) bindings.push({ name: name.text, node: name, scope, isThisAlias })
     else if (name && (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name))) {
@@ -40,6 +41,25 @@ function buildIndex(text, language, fileName = 'untitled.js') {
     }
   }
   function visit(node) {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
+      node.importClause && !node.importClause.isTypeOnly) {
+      const clause = node.importClause
+      const specifier = node.moduleSpecifier.text
+      if (clause.name) {
+        imports.push({ local: clause.name, specifier, symbol: 'default' })
+      }
+      const named = clause.namedBindings
+      if (named && ts.isNamespaceImport(named)) {
+        imports.push({ local: named.name, specifier, symbol: '*' })
+      } else if (named && ts.isNamedImports(named)) {
+        for (const entry of named.elements) {
+          if (!entry.isTypeOnly) {
+            imports.push({ local: entry.name, original: entry.propertyName, specifier,
+              symbol: entry.propertyName?.text || entry.name.text })
+          }
+        }
+      }
+    }
     if (ts.isExportAssignment(node)) {
       const obj = asObject(node.expression)
       if (obj) options.push(obj)
@@ -63,8 +83,9 @@ function buildIndex(text, language, fileName = 'untitled.js') {
   const template = language === 'vue'
     ? buildTemplateIndex(text, expression => buildIndex(expression, kind === ts.ScriptKind.TS ? 'typescript' : 'javascript'))
     : { expressions: [], references: [] }
-  return { root, source, bindings, options, thisAssignments, templates: template.expressions,
-    templateReferences: template.references, fileName,
+  return { root, text, source, bindings, options, imports, thisAssignments, templates: template.expressions,
+    templateReferences: template.references, blocks: template.blocks || [], tags: template.tags || [],
+    templateTexts: template.texts || [], fileName,
     scriptSetup: language === 'vue' && /<script\b[^>]*\bsetup(?:\s|=|>)/i.test(text) }
 }
 
@@ -246,6 +267,33 @@ function findDefinition(index, offset) {
   return { start: target.getStart(index.root), end: target.end }
 }
 
+function findImportReference(index, offset) {
+  if (!index || offset < 0 || offset >= index.source.length) {
+    return null
+  }
+  const id = findIdentifier(index.root, offset)
+  if (!id) {
+    return null
+  }
+  const declaration = index.imports.find(binding => binding.local === id || binding.original === id)
+  if (declaration) {
+    return { specifier: declaration.specifier, symbol: declaration.symbol }
+  }
+  const parent = id.parent
+  if (ts.isPropertyAccessExpression(parent) && parent.name === id) {
+    if (!ts.isIdentifier(parent.expression) || resolveBinding(index, parent.expression, offset)) {
+      return null
+    }
+    const namespace = index.imports.find(binding => binding.symbol === '*' && binding.local.text === parent.expression.text)
+    return namespace ? { specifier: namespace.specifier, symbol: id.text } : null
+  }
+  if ((parent.name === id && !ts.isShorthandPropertyAssignment(parent)) || resolveBinding(index, id, offset)) {
+    return null
+  }
+  const binding = index.imports.find(binding => binding.local.text === id.text)
+  return binding ? { specifier: binding.specifier, symbol: binding.symbol } : null
+}
+
 function templateDefinition(index, expression, offset) {
   const localOffset = expression.source.fromSource[offset - expression.start] + expression.prefix
   const id = findIdentifier(expression.index.root, localOffset)
@@ -262,7 +310,9 @@ function templateDefinition(index, expression, offset) {
         end: expression.start + expression.source.toSource[binding.node.end - expression.prefix]
       }
     }
-    if (expression.locals.has(id.text)) return null
+    if (expression.locals.has(id.text)) {
+      return expression.localDefinitions?.get(id.text) || null
+    }
   }
   const component = index.options[0]
   const target = component && vueMember(component, id.text)
@@ -290,4 +340,80 @@ function isAncestor(ancestor, node) {
 }
 function depth(node) { let d = 0; for (; node; node = node.parent) d++; return d }
 
-module.exports = { buildIndex, findDefinition, sourceText }
+// Completion reads the same component declarations and this ownership as
+// definitions. No TypeScript project or filesystem scan is needed.
+function componentMembers(index, owner = index.options[0]) {
+  if (!owner || !ts.isObjectLiteralExpression(owner)) {
+    return []
+  }
+  const names = new Map()
+  function add(node, kind, detail) {
+    const name = propName(node) || (ts.isStringLiteral(node) ? node.text : null)
+    if (name && /^[$\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*$/u.test(name)) {
+      names.set(name, { name, kind, detail })
+    }
+  }
+  for (const group of ['props', 'data', 'setup', 'computed', 'methods']) {
+    const prop = member(owner, group)
+    if (!prop) {
+      continue
+    }
+    let object = prop.initializer
+    if (group === 'data' || group === 'setup') {
+      const body = prop.body || prop.initializer?.body
+      if (body && ts.isBlock(body)) {
+        const returned = body.statements.find(statement => ts.isReturnStatement(statement) && statement.expression)
+        object = returned && asObject(returned.expression)
+      } else if (body) {
+        object = asObject(body)
+      }
+    }
+    if (object && ts.isObjectLiteralExpression(object)) {
+      for (const entry of object.properties) {
+        add(entry, group === 'methods' ? 'method' : 'property', `Vue ${group}`)
+      }
+    } else if (group === 'props' && object && ts.isArrayLiteralExpression(object)) {
+      for (const entry of object.elements) {
+        if (ts.isStringLiteral(entry)) {
+          add(entry, 'property', 'Vue props')
+        }
+      }
+    }
+  }
+  return [...names.values()]
+}
+
+function instanceAccess(index, offset) {
+  let access
+  function visit(node) {
+    if (offset < node.getFullStart() || offset > node.end) {
+      return
+    }
+    if (ts.isPropertyAccessExpression(node) && offset >= node.name.getStart(index.root) && offset <= node.name.end) {
+      access = node
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(index.root)
+  return access
+}
+
+function templateThisAt(index, offset) {
+  const access = instanceAccess(index, offset)
+  return Boolean(access && access.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    thisOwner(index, access.name) === index.root)
+}
+
+function instanceCompletions(index, offset) {
+  const access = instanceAccess(index, offset)
+  if (!access || !isInstanceReceiver(index, access.expression, offset)) {
+    return []
+  }
+  const owner = thisOwner(index, access.name)
+  return index.options.includes(owner) ? componentMembers(index, owner) : []
+}
+
+module.exports = {
+  buildIndex, findDefinition, findImportReference, sourceText, componentMembers,
+  instanceCompletions, templateThisAt, vueMember, thisOwner, isInstanceReceiver
+}

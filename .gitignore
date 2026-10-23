@@ -8,3 +8,4 @@ dist/
 .vsce_pat
 .agent
 .agent-teams
+.vscode-test/

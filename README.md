@@ -1,6 +1,78 @@
 # Vue2Click
 
-一个用于“转到定义”的轻量 VS Code 扩展。主要解决 Vue 2 单文件组件中，`this.createdInit()` 等本文件方法无法通过语言服务跳转的问题；也支持模板表达式、子组件标签与 props，以及本文件内的普通函数和变量。
+一个面向 Vue 2 日常开发的独立 VS Code 扩展。提供单文件组件高亮、快速定义跳转、代码片段，以及 Vue/TypeScript 语义补全、自动导入、类型检查、悬停、参数提示、引用与重命名。支持成员大纲、常见静态 mixin/全局/Vuex/`$refs`/事件关系，以及 HTML/CSS 编辑辅助。不依赖 Vetur 或 Vue - Official。
+
+## 0.3.0 的使用场景
+
+| 能力 | 常见操作 |
+| --- | --- |
+| Vue 成员大纲 | 通过文件大纲或 Cmd/Ctrl+Shift+O 在 data、computed、methods 与其成员间定位 |
+| 悬停与 JSDoc | 鼠标停在方法、属性或导入函数上阅读类型、`/** ... */` 注释、`@param` 和返回说明 |
+| 参数提示 | 输入函数括号、逗号时查看签名与当前参数 |
+| 查找引用 | 修改方法前查看模板、脚本及同项目其他组件中的语义引用 |
+| 语义重命名 | F2 同时修改声明及已确认的引用；同名局部变量按作用域区分 |
+| 深层类型补全与自动导入 | 补全对象属性，选中导出函数建议后插入相应 import |
+| 脚本与模板类型检查 | 提示不存在的成员、参数类型不匹配等错误；遵循 jsconfig/tsconfig |
+| mixin / extends | 跳到静态继承的成员与 props，本组件声明优先；补全继承成员 |
+| 全局组件与实例成员 | 追踪顶层静态 `Vue.component('Name', Component)`、`Vue.prototype.$name = ...` |
+| Vuex 与组件 ref | 追踪静态 mapState/mapGetters/mapActions/mapMutations、store 路径与 `this.$refs.dialog.open()` |
+| 组件事件 | 从父组件的 `@saved` 跳到子组件的 `$emit('saved')` 或 emits 声明 |
+| 循环与插槽变量 | 从使用位置跳到 v-for、v-slot、slot-scope 中的声明，支持解构与嵌套遮蔽 |
+| HTML / CSS / SCSS / Less | 补全、悬停、块内格式化、链接、折叠、关联标签编辑、CSS 诊断、颜色与变量跳转 |
+
+Vue/TypeScript 语义服务在独立工作线程内运行，使用仍支持 Vue 2 的语言核心。首次项目分析有冷启动成本，随后复用文档快照与类型程序。项目依赖中的 Vue 类型需要已安装；动态注入或未声明的第三方类型无法凭空获得准确类型。静态关系追踪补充定义与补全，不把运行时事件名、Vuex 字符串协议自动当作安全重命名范围。
+
+JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位的本地和静态导入声明仍可显示注释；不依赖内置 JS/TS 悬停是否命中。
+
+## 高亮与基础编辑
+
+独立安装即可识别 `.vue` 文件。支持 HTML 模板、Vue 指令与插值，以及 `<script>` 中的 JavaScript / TypeScript / JSX / TSX 和 `<style>` 中的 CSS / SCSS / Less 高亮；脚本和样式复用 VS Code 内置语法。支持单行、分行的块标签及嵌套 `<template>`。Pug、Sass、Stylus 的高亮依赖相应语法扩展，跳转和补全仍以本文列出的范围为准。
+
+模板、脚本和样式的注释、括号规则随嵌入语言切换；模板使用 `<!-- -->`。不改变用户主题、保存行为和格式化设置。
+
+## 片段与快速补全
+
+输入前缀后从建议列表选择片段，再按 Tab 在占位符之间移动；未自动弹出时可用 **Ctrl+Space** 手动触发。
+
+| 位置 | 前缀 | 内容 |
+| --- | --- | --- |
+| 空 Vue 文件 | `vbase`、`vue2` | Vue 2 Options API 单文件组件 |
+| 脚本代码 | `vdata`、`vmethods`、`vcomputed`、`vwatch`、`vprops` | 常用选项 |
+| 脚本代码 | `vcreated`、`vmounted` | 生命周期 |
+| 模板标签属性 | `vif`、`velse`、`vfor`、`vmodel` | 条件、循环及双向绑定 |
+| 模板标签属性 | `vbind`、`von`、`vslot` | 属性、事件及插槽（`vslot` 需要 Vue 2.6+） |
+
+片段按所在区域提供，不会把 `vdata` 放进样式、注释和字符串。
+
+- `this.` 和直接的 `this` 别名后，提示当前组件明确声明的 `data`、`props`、`computed`、`methods` 及 `setup()` 返回成员；嵌套普通函数或对象中的 `this` 不借用外层组件成员。
+- 模板插值和指令表达式中提示组件成员及 `v-for` / 插槽局部变量；局部变量优先。`user.` 等深层对象属性不做类型推断。
+- 输入组件标签时，提示 `components` 中直接注册的组件；`<script setup>` 中直接导入的 `.vue` 组件也支持。
+- 已注册组件的属性位置提示子组件直接声明的 props，使用短横线名称，保留已有的 `:`，过滤已经填写的属性。可读取对象、字符串数组和本文件直接 `defineProps` 类型声明，使用未保存的编辑器内容。
+- 快速补全与本地跳转复用文档版本缓存；项目类型能力由工作线程补充，可独立关闭。
+
+快速补全支持 Vue 文件及设为 Vue 的未命名文件；未命名文件不解析跨文件 props，也不建立项目类型服务。前述 `user.` 深层对象属性等能力由开启的项目语言服务补充。
+
+## 独立安装与设置
+
+通过 VS Code 扩展面板的「从 VSIX 安装」选择 `vueClick-0.3.0.vsix`，重新加载窗口后即可使用。仅依赖 VS Code 自带的基础语法，不需要安装 Vetur 或 Vue - Official。若原来安装过其他 Vue 语言扩展，在当前工作区禁用后重新加载窗口，即可独立使用本扩展。
+
+各项能力默认开启；可按工作区调整：
+
+```json
+{
+  "vueClick.definition.enabled": true,
+  "vueClick.completion.enabled": true,
+  "vueClick.snippets.enabled": true,
+  "vueClick.languageService.enabled": true,
+  "vueClick.diagnostics.enabled": true
+}
+```
+
+设置即时生效。关闭 `languageService.enabled` 可停用项目语义能力，保留快速跳转、片段、静态注释回退和 HTML/CSS 服务。`diagnostics.enabled` 控制问题面板诊断。保留标准 `vue` 语言 ID，不修改其他扩展或用户编辑器的设置。
+
+扩展入口与语言工作线程均以 CommonJS 打包，使用宿主提供的 `require('vscode')`，没有声明 `"type": "module"`。构建检查会实际加载入口、检查提供者注册，并启动打包后的工作线程验证 Vue 2 类型与随包 TypeScript 标准库。历史宿主验证与当前版本验证记录见 [验证记录](docs/lightweight-validation.md)。
+
+模板语法适配自 Vetur v0.37.3，来源与许可见 [ThirdPartyNotices.txt](ThirdPartyNotices.txt)。语义能力复用 Vue language-core / Volar / TypeScript；HTML/CSS 使用对应语言服务，没有移植 Vetur 的整套服务器。
 
 ## 用法
 
@@ -46,6 +118,16 @@ export default {
 组件解析支持 `components: { AddressTab }`、重命名注册、字符串键、本文件组件变量、`Vue.extend` / `defineComponent`、静态 `() => import(...)` / `defineAsyncComponent(...)` / `require(...)`，以及明确的默认、命名和 `export *` 转导出。普通 Options API 的导入需要在 `components` 中注册；`<script setup>` 的组件导入可直接用于标签。子组件的运行时 `defineProps`、直接类型声明和本文件接口/类型别名也支持定位。
 
 导入路径支持相对路径、省略扩展名、目录 `index`，以及最近的 `jsconfig.json` / `tsconfig.json` 中的 `baseUrl`、`paths` 和 `extends`（允许注释）。没有显式别名配置时，`@/`、`~/` 可回退到最近项目的 `src`；明确的别名配置优先。组件包会查找静态运行时入口，不会跳到 `.d.ts`。扩展只读取配置数据，不执行项目配置或组件代码。
+
+脚本中的普通 ES module 导入也支持跨文件定义跳转。例如：
+
+```js
+import { sgmCodeF as report } from '@/config/mUtils.js'
+
+report({ code: 'example' }) // 点击 report → mUtils.js 中导出的 sgmCodeF 声明
+```
+
+支持命名导入、重命名、默认导入、直接的命名空间成员（`utils.report`），以及命名/默认/`export *` 转导出。定位导出的函数、类或变量声明；同名局部变量优先。读取目标文件当前的编辑器内容，未保存修改也会更新位置。不执行模块；类型专用导入、CommonJS 导出和动态对象成员暂不解析，导出链有循环、深度/工作量超限或歧义时不返回定义。
 
 ```js
 const count = 1
@@ -97,16 +179,30 @@ methods: {
 
 ## 边界
 
-本文件定义解析限于 `<script>` 和 HTML `<template>` 表达式；跨文件解析限于可静态确定的组件及其直接声明的 props。外部 `<script src>` / `<template src>`、Pug 等模板预处理器、全局组件注册、mixin/extends 注入的 props、导入的 props 类型、`defineModel`、动态组件来源、动态属性名（如 `this[name]`）及 `this.$refs` 指向的成员暂不解析。Webpack/Vue 配置中的动态别名、带 loader 或 URL 查询参数的导入也不解析。
+快速解析限于 `<script>` 和 HTML `<template>` 表达式；跨文件覆盖静态 ES module 导入、组件和直接声明 props。项目语言服务进一步处理类型、引用与重命名，静态追踪进一步处理 mixin、全局注册、Vuex、ref 和事件。类型完整性受项目声明与配置限制。
 
-原生 HTML/SVG 标签、模板注释和 `v-pre` 内容不参与组件跳转。普通文本和属性值字符串不参与表达式跳转；注册组件上的静态属性名称可跳到对应 prop。存在 `is` 覆盖、动态参数或对象 `v-bind` 时，组件来源可能变化，暂不提供该标签和左侧参数的跨文件跳转，右侧本地表达式仍可定位。事件名称暂不跳到子组件的 emits。
+仍有明确边界：外部 `<template src>`、Pug 等模板预处理器的源位置映射、运行时计算的组件/事件名、插件安装时动态注册的成员、动态 Vuex 模块及复杂 store 工厂、无法唯一确定的 ref、动态属性名（如 `this[name]`），以及 Webpack/Vue 配置中的可执行别名。不会运行项目配置或组件代码。静态全局注册只识别导入 Vue 的顶层注册；TypeScript 声明过的全局类型则由类型服务处理。
 
-`v-for`、插槽声明的局部变量暂不提供定义。`this` 别名只识别直接赋值（`const me = this`），二次别名（`const other = me`）不解析；别名赋值出的动态属性（`me.foo = 1`）暂不视为声明。文件缺失、读取失败、配置损坏、循环/过深的导出链、定义歧义或请求被取消时不返回定义，其他已安装的语言服务仍可提供跳转。本地变量和方法定位不依赖跨文件读取。此扩展不修改被编辑的项目文件。
+原生 HTML/SVG 标签、模板注释和 `v-pre` 内容不参与静态组件跳转。普通文本和属性值字符串不参与表达式跳转；注册组件上的静态属性名称可跳到对应 prop。存在 `is` 覆盖、动态参数或对象 `v-bind` 时，快速路径不猜测组件来源；项目语言服务只在能够推断时补充。
+
+快速路径中，`this` 别名只识别直接赋值（`const me = this`）；更深的关系由项目类型服务尝试推断。文件缺失、读取失败、循环/过深的导出链、定义歧义或取消时不强行生成静态结果。定义跳转、查询与诊断不写项目文件；自动导入、格式化和重命名通过标准编辑器编辑接口，在用户主动操作后产生编辑。
 
 ## 性能
 
 文件索引按文档版本复用，修改或关闭文档后失效。模板表达式只在查询时解析，同一版本内相同的表达式共享语法树，各自保留原文件偏移和模板作用域。索引缓存按最近使用顺序淘汰，最多保留 32 个文档及 400 万源码字符；这是缓存容量限制，并非实际堆内存上限。
 
-跨文件查询在单次请求中共享配置读取、文件存在性检查及文档加载；同时进行的相同路径解析或文档打开会合并为一个操作。每个请求仍独立检查取消状态和文档版本。完成后的路径解析结果不永久缓存，新查询会重新检查文件和配置。
+快速跨文件查询在单次请求中共享配置读取、文件存在性检查及文档加载；并发请求合并相同文件的在途读取。项目语言服务保留一个活跃项目工作线程，切换项目时释放旧线程，文档按版本增量发送；打开文件的未保存内容优先，文件与配置变更通知会使相关状态失效。诊断在活动 Vue 文档中防抖刷新，后台文件不抢占交互请求所在的项目。项目分析需要额外内存，原有轻量路径的缓存上限不代表新类型服务的内存上限。
 
 运行 `npm run benchmark` 查看索引构建、重复查询和跨文件读取次数；`npm run benchmark -- --json` 输出完整数据。没有原始业务项目时使用合成文件，也可通过 `BENCH_PROJECT_ROOT` 指定业务项目。该基准不包含 VS Code UI、其他语言插件和扩展启动时间；跨文件基准中的请求级缓存对照不包含扩展的并发请求合并。测试通过操作次数和作用域验证复用行为，不使用机器相关的耗时阈值。
+
+`npm run benchmark:file -- /绝对路径/Component.vue` 对指定真实文件运行只读基准，包含索引、分散位置的重复跳转/补全、真实组件与 props 跨文件解析，并用 SHA-256 核对读取的源码和配置保持不变。该命令输出 JSON，不写入业务项目。
+
+## 开发与验证
+
+`npm test` 运行解析、作用域、补全、取消/版本失效和真实 TextMate 引擎测试；`npm run package` 测试、构建并生成可通过 VS Code「从 VSIX 安装」使用的安装包。
+
+`npm run test:vscode` 在独立临时配置中运行真实 VS Code 扩展宿主测试，不修改日常编辑器配置。默认下载稳定版，可通过 `VSCODE_TEST_VERSION=1.90.2` 检查 1.90 系列兼容性，或通过 `VSCODE_EXECUTABLE_PATH` 指向本机 VS Code 可执行文件。测试验证文件识别、编辑器补全、跳转、未保存 props、配置开关及内置 JS/TS/CSS 语法的实际分词。
+
+扩展宿主测试在禁用其他用户扩展的条件下运行，并确认 Vetur 与 Vue - Official 没有加载，验证独立使用。
+
+设置 `VUECLICK_TEST_FILE=/绝对路径/Component.vue` 可增加真实大文件实测，在编辑器中检查分散位置的跳转、成员补全、跨文件 props、高亮分词并输出延迟分布。业务源文件只读，修改行为仅在临时样例和未命名文档中验证。

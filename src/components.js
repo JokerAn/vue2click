@@ -207,6 +207,9 @@ async function findComponentDefinition(index, offset, context) {
     const traversal = { ...context, remaining: 128 }
     const component = await resolveComponent(index, registration, traversal, new Set(), 0)
     if (!component || traversal.remaining < 0 || context.isCancelled?.()) return null
+    if (reference.kind === 'event') {
+      return null
+    }
     if (reference.kind === 'prop' || reference.kind === 'model') {
       let name = reference.name
       if (reference.kind === 'model' && !name) {
@@ -229,4 +232,60 @@ async function findComponentDefinition(index, offset, context) {
   }
 }
 
-module.exports = { findComponentDefinition }
+async function componentProps(index, tag, context) {
+  try {
+    const registration = componentRegistration(index, tag)
+    if (!registration || context.isCancelled?.()) {
+      return []
+    }
+    const traversal = { ...context, remaining: 128 }
+    const component = await resolveComponent(index, registration, traversal, new Set(), 0)
+    if (!component || traversal.remaining < 0 || context.isCancelled?.()) {
+      return []
+    }
+    const names = new Set()
+    function collect(node) {
+      node = unwrap(node)
+      if (node && ts.isIdentifier(node)) {
+        node = unwrap(topDeclaration(component.index, node.text)?.initializer)
+      }
+      if (node && (ts.isObjectLiteralExpression(node) || ts.isTypeLiteralNode(node) || ts.isInterfaceDeclaration(node))) {
+        for (const prop of node.properties || node.members) {
+          if (key(prop)) {
+            names.add(key(prop))
+          }
+        }
+      } else if (node && ts.isArrayLiteralExpression(node)) {
+        for (const entry of node.elements) {
+          if (ts.isStringLiteral(entry)) {
+            names.add(entry.text)
+          }
+        }
+      }
+    }
+    collect(initializer(property(component.options, 'props')))
+    if (component.index.scriptSetup) {
+      function visit(node) {
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'defineProps') {
+          collect(node.arguments[0])
+          let type = node.typeArguments?.[0]
+          if (type && ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) {
+            const declaration = topDeclaration(component.index, type.typeName.text)
+            type = declaration && (ts.isTypeAliasDeclaration(declaration) ? declaration.type : declaration)
+          }
+          collect(type)
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(component.index.root)
+    }
+    return [...names].filter(name => /^[A-Za-z_$][\w$-]*$/.test(name))
+  } catch {
+    return []
+  }
+}
+
+module.exports = {
+  findComponentDefinition, componentProps, componentOptions, componentRegistration,
+  resolveComponent, property, initializer, localObject, propDeclaration, key
+}
