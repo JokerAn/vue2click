@@ -3,6 +3,8 @@
 const ts = require('typescript')
 const { componentRegistration, resolveComponent, property, initializer, localObject, key } = require('./components')
 const { thisOwner } = require('./resolver')
+const { createTypeResolver } = require('./component-types')
+const { describeSlots } = require('./slots')
 const camel = name => name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())
 const kebab = name => name.replace(/\B([A-Z])/g, '-$1').toLowerCase()
 
@@ -64,53 +66,21 @@ async function describeComponent(index, options, context) {
   const props = new Map()
   const events = new Map()
   const visited = new Set()
-  async function resolveType(declaration, source) {
-    if (!declaration || !ts.isTypeReferenceNode(declaration)) {
-      return { declaration, source }
-    }
-    const name = declaration.typeName.getText(source.root)
-    let target = source.root.statements.find(node => node.name?.text === name)
-    if (target) {
-      return { declaration: ts.isTypeAliasDeclaration(target) ? target.type : target, source }
-    }
-    for (const statement of source.root.statements.filter(ts.isImportDeclaration)) {
-      if (!ts.isStringLiteral(statement.moduleSpecifier)) {
-        continue
-      }
-      const clause = statement.importClause
-      const bindings = clause?.namedBindings
-      const imported = clause?.name?.text === name || bindings && ts.isNamedImports(bindings) &&
-        bindings.elements.some(element => element.name.text === name &&
-          (element.isTypeOnly || clause.isTypeOnly))
-      if (!imported) {
-        continue
-      }
-      const original = clause.name?.text === name ? 'default' : bindings.elements.find(element =>
-        element.name.text === name).propertyName?.text || name
-      const file = await context.resolveModule?.(statement.moduleSpecifier.text, source.fileName)
-      const targetIndex = file && await context.loadIndex?.(file)
-      const exported = targetIndex?.root.statements.find(node => node.name?.text === original &&
-        node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword))
-      if (exported) {
-        return { declaration: ts.isTypeAliasDeclaration(exported) ? exported.type : exported, source: targetIndex }
-      }
-    }
-    return { declaration, source }
-  }
+  const types = createTypeResolver(context)
   async function addProps(declaration, source) {
     declaration = localObject(source, declaration) || declaration
-    const resolved = await resolveType(declaration, source)
-    declaration = resolved.declaration
-    source = resolved.source
-    if (declaration && ts.isTypeAliasDeclaration(declaration)) {
-      declaration = declaration.type
-    }
     if (declaration && ts.isArrayLiteralExpression(declaration)) {
       for (const entry of declaration.elements.filter(ts.isStringLiteral)) {
         props.set(camel(entry.text), { name: entry.text, type: 'unknown', required: false, values: [] })
       }
-    } else if (declaration && (ts.isObjectLiteralExpression(declaration) || ts.isTypeLiteralNode(declaration) || ts.isInterfaceDeclaration(declaration))) {
-      for (const entry of declaration.properties || declaration.members) {
+    } else if (declaration) {
+      const entries = ts.isObjectLiteralExpression(declaration)
+        ? declaration.properties.map(node => ({ node, source })) : await types.members(declaration, source)
+      for (const { node: entry, source: entrySource } of entries) {
+        if (context.isCancelled?.()) {
+          return
+        }
+        const source = entrySource
         const name = key(entry)
         if (!name) {
           continue
@@ -127,7 +97,12 @@ async function describeComponent(index, options, context) {
         const type = (runtimeTypes?.join(' | ') || rawType).replace(/\b(String|Number|Boolean|Object|Array|Function)\b/g, word =>
           ({ String: 'string', Number: 'number', Boolean: 'boolean', Object: 'object', Array: 'array', Function: 'function' })[word])
         const defaultNode = property(runtime, 'default')
-        const values = [...literals(entry.type || contract), ...validatorValues(initializer(property(runtime, 'validator')))]
+        const literalTypes = entry.type || contract ? await types.literalTypes(entry.type || contract, source) : []
+        if (context.isCancelled?.()) {
+          return
+        }
+        const values = [...(literalTypes || []).flatMap(value => literals(value.node)),
+          ...validatorValues(initializer(property(runtime, 'validator')))]
         const doc = documentation(entry, source.root)
         // JSDoc literal unions are explicit contracts, unlike arbitrary validator code.
         const union = /@type\s*\{([^}]+)\}/.exec(doc)
@@ -174,9 +149,13 @@ async function describeComponent(index, options, context) {
         }
       }
     }
-    async function visit(node) {
+    const declarations = []
+    function visit(node) {
+      if (context.isCancelled?.()) {
+        return
+      }
       if (source.scriptSetup && ts.isCallExpression(node) && node.expression.text === 'defineProps') {
-        await addProps(node.arguments[0] || node.typeArguments?.[0], source)
+        declarations.push(node.arguments[0] || node.typeArguments?.[0])
       }
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
         node.expression.expression.kind === ts.SyntaxKind.ThisKeyword && node.expression.name.text === '$emit' &&
@@ -187,11 +166,12 @@ async function describeComponent(index, options, context) {
             signature: `${name}(${node.arguments.slice(1).map(value => value.getText(source.root)).join(', ')})` })
         }
       }
-      const children = []
-      ts.forEachChild(node, child => { children.push(visit(child)) })
-      await Promise.all(children)
+      ts.forEachChild(node, visit)
     }
-    await visit(source.root)
+    visit(source.root)
+    for (const declaration of declarations) {
+      await addProps(declaration, source)
+    }
     // Read only the template expressions containing an emit, preserving lazy parsing elsewhere.
     for (const expression of source.templates) {
       if (!/\$emit\s*\(/.test(source.text.slice(expression.start, expression.end))) {
@@ -209,7 +189,7 @@ async function describeComponent(index, options, context) {
     }
   }
   await collect(index, options)
-  return { props: [...props.values()], events: [...events.values()] }
+  return { props: [...props.values()], events: [...events.values()], slots: describeSlots(index) }
 }
 
 async function componentInfo(index, tag, context) {

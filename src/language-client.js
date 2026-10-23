@@ -4,7 +4,7 @@ const { Worker } = require('node:worker_threads')
 const path = require('node:path')
 const fs = require('node:fs')
 
-function createLanguageClient(vscode, context, WorkerClass = Worker) {
+function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 5 * 60 * 1000 } = {}) {
   const projects = new Map()
   let sequence = 0
   function stamp(file) {
@@ -17,6 +17,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
   }
   function dispose(project) {
     project.disposed = true
+    clearTimeout(project.idleTimer)
     project.queue.length = 0
     project.active = null
     project.worker.terminate()
@@ -25,6 +26,19 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
       pending.dispose()
     }
     project.pending.clear()
+  }
+  function idle(project) {
+    clearTimeout(project.idleTimer)
+    if (project.disposed || project.active !== null || project.queue.length) {
+      return
+    }
+    project.idleTimer = setTimeout(() => {
+      if (projects.get(project.root) === project && project.active === null && !project.queue.length) {
+        dispose(project)
+        projects.delete(project.root)
+      }
+    }, idleMs)
+    project.idleTimer.unref?.()
   }
   function dispatch(project) {
     if (project.disposed || project.active !== null) {
@@ -59,6 +73,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
         pending.reject(error)
       }
     }
+    idle(project)
   }
   function rootFor(document) {
     const workspace = vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath
@@ -91,6 +106,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
         const workerPath = fs.existsSync(bundledWorker) ? bundledWorker : path.join(__dirname, 'language-worker.js')
         const libDirectory = path.join(path.dirname(bundledWorker), 'typescript')
         project = {
+          root,
           worker: new WorkerClass(workerPath, { workerData: {
             root, firstFile: document.fileName,
             libDirectory: fs.existsSync(libDirectory) ? libDirectory : undefined
@@ -120,17 +136,21 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
             dispatch(current)
           }
         })
-        project.worker.on('error', error => {
-          current.disposed = true
-          current.active = null
-          current.queue.length = 0
+        function failed(error) {
+          if (current.disposed) {
+            return
+          }
+          clearTimeout(current.idleTimer)
           for (const pending of current.pending.values()) {
-            pending.dispose()
             pending.reject(error)
           }
-          current.pending.clear()
-          projects.delete(root)
-        })
+          dispose(current)
+          if (projects.get(root) === current) {
+            projects.delete(root)
+          }
+        }
+        project.worker.on('error', failed)
+        project.worker.on('exit', code => failed(new Error(`VueClick language worker exited (${code}).`)))
         projects.set(root, project)
         while (projects.size > 1) {
           const oldest = projects.keys().next().value
@@ -140,8 +160,10 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
       }
       projects.delete(root)
       projects.set(root, project)
+      clearTimeout(project.idleTimer)
       const openDocuments = (vscode.workspace.textDocuments || [document])
-        .filter(source => source.uri.scheme === 'file' && /\.(vue|[cm]?[jt]sx?)$/.test(source.fileName))
+        .filter(source => source.uri.scheme === 'file' && !source.isClosed &&
+          source.fileName.startsWith(root + path.sep) && /\.(vue|[cm]?[jt]sx?)$/.test(source.fileName))
       const sourceDocuments = openDocuments.some(source => source.fileName === document.fileName)
         ? openDocuments : [...openDocuments, document]
       const versions = new Map(sourceDocuments.map(source => [source, source.version]))
@@ -199,6 +221,31 @@ function createLanguageClient(vscode, context, WorkerClass = Worker) {
         dispose(project)
       }
       projects.clear()
+    },
+    status(document) {
+      const root = document?.uri.scheme === 'file' ? rootFor(document) : undefined
+      const project = root ? projects.get(root) : projects.values().next().value
+      return {
+        root: root || project?.root,
+        state: !project ? 'not-started' : project.active === null ? 'ready' : 'busy',
+        pendingRequests: project?.pending.size || 0,
+        queuedRequests: project?.queue.length || 0,
+        idleReleaseMinutes: idleMs / 60000
+      }
+    },
+    close(document) {
+      for (const [root, project] of projects) {
+        if (!document.fileName.startsWith(root + path.sep)) {
+          continue
+        }
+        const open = (vscode.workspace.textDocuments || []).some(source => source !== document && !source.isClosed &&
+          source.uri.scheme === 'file' && /\.(vue|[cm]?[jt]sx?)$/.test(source.fileName) &&
+          source.fileName.startsWith(root + path.sep))
+        if (!open) {
+          dispose(project)
+          projects.delete(root)
+        }
+      }
     },
     fileChanged(fileName, kind) {
       for (const [root, project] of projects) {

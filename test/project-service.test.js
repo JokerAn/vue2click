@@ -25,6 +25,54 @@ function fixture(t, files) {
   return { root, file, service }
 }
 
+test('slot completions read explicit child payload names and update after unsaved edits', async t => {
+  const text = `<template><Child><template #row="{ it }"/></Child></template><script>
+import Child from './Child.vue'; export default { components: { Child } }</script>`
+  const child = '<template><slot name="row" :item="item" :index="index" /></template><script>export default {}</script>'
+  const { root, file, service } = fixture(t, { 'Parent.vue': text, 'Child.vue': child })
+  const names = await service.run('slotCompletions', file, text.indexOf('#row') + 2)
+  assert.ok(names.some(entry => entry.name === 'row'))
+  const props = await service.run('slotCompletions', file, text.indexOf('{ it') + 4)
+  assert.deepEqual(props.map(entry => entry.name), ['item', 'index'])
+  assert.ok(props.every(entry => entry.detail.endsWith('unknown')))
+  service.sync([{ fileName: file, version: 1 }, {
+    fileName: path.join(root, 'Child.vue'), version: 1, text: child.replace(':item="item"', ':record="item"')
+  }])
+  assert.deepEqual((await service.run('slotCompletions', file, text.indexOf('{ it') + 4)).map(entry => entry.name),
+    ['record', 'index'])
+})
+
+test('missing template methods generate only when no static or semantic member exists', async t => {
+  const text = '<template><button @click="submit(row)" /></template><script>export default { data() { return { row: {} } } }</script>'
+  const { file, service } = fixture(t, { 'Parent.vue': text })
+  const edits = await service.run('createTemplateMethod', file, text.indexOf('submit') + 2)
+  assert.ok(edits?.some(change => change.textChanges.some(edit => edit.newText.includes('submit(row)'))))
+  const edited = text.replace('return { row: {} }', 'return { row: {}, submit: () => {} }')
+  service.sync([{ fileName: file, version: 2, text: edited }])
+  assert.equal(await service.run('createTemplateMethod', file, edited.indexOf('submit') + 2), null)
+})
+
+test('component contracts are reused and refreshed after an unsaved child edit', async t => {
+  const text = `<template><Child :mode="" /></template><script>
+import Child from './Child.vue'; export default { components: { Child } }</script>`
+  const child = '<script>export default { props: { mode: { type: String, required: true } } }</script>'
+  const { root, file, service } = fixture(t, { 'Parent.vue': text, 'Child.vue': child })
+  const metadata = require('../src/component-info')
+  const original = metadata.componentInfo
+  let calls = 0
+  t.mock.method(metadata, 'componentInfo', (...args) => { calls++; return original(...args) })
+  const position = text.indexOf(':mode') + 2
+  assert.match((await service.run('componentHover', file, position)).text, /required/)
+  await service.run('templateCompletions', file, text.indexOf(':mode="') + ':mode="'.length)
+  await service.run('componentHover', file, position)
+  assert.equal(calls, 1, 'repeated queries must not traverse the component again')
+  service.sync([{ fileName: file, version: 1 }, {
+    fileName: path.join(root, 'Child.vue'), version: 1, text: child.replace('required: true', 'required: false')
+  }])
+  assert.ok(!(await service.run('componentHover', file, position)).text.includes('required'))
+  assert.equal(calls, 2, 'changed child contracts must be reparsed')
+})
+
 test('project metadata refreshes after its JSON file changes', async t => {
   const text = '<template><custom-child mode="" /></template><script>export default {}</script>'
   const { root, file, service } = fixture(t, {
@@ -40,6 +88,25 @@ test('project metadata refreshes after its JSON file changes', async t => {
   fs.writeFileSync(metadata, JSON.stringify({ 'custom-child/mode': { type: 'string', options: ['view'] } }))
   service.invalidate(metadata, 'change')
   assert.deepEqual((await service.run('templateCompletions', file, offset)).map(item => item.name), ['view'])
+})
+
+test('library contracts match PascalCase tags and refresh metadata with a non-JSON extension', async t => {
+  const text = '<template><CustomChild mode="" @ /></template><script>export default {}</script>'
+  const { root, file, service } = fixture(t, {
+    'Parent.vue': text,
+    'package.json': JSON.stringify({ vetur: { tags: 'tags.data', attributes: 'attributes.data' } }),
+    'tags.data': JSON.stringify({ 'custom-child': { attributes: ['mode', 'saved'] } }),
+    'attributes.data': JSON.stringify({
+      'custom-child/mode': { type: 'string', options: ['edit'] }, 'custom-child/saved': { type: 'event' }
+    })
+  })
+  const value = text.indexOf('mode="') + 'mode="'.length
+  assert.deepEqual((await service.run('templateCompletions', file, value)).map(item => item.name), ['edit'])
+  assert.ok((await service.run('templateCompletions', file, text.indexOf('@') + 1)).some(item => item.name === 'saved'))
+  const metadata = path.join(root, 'attributes.data')
+  fs.writeFileSync(metadata, JSON.stringify({ 'custom-child/mode': { type: 'string', options: ['view'] } }))
+  service.invalidate(metadata, 'change')
+  assert.deepEqual((await service.run('templateCompletions', file, value)).map(item => item.name), ['view'])
 })
 
 test('Vue2 semantic service maps types, errors, signatures, references and rename back to source', async t => {

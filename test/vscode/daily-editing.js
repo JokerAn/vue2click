@@ -12,8 +12,22 @@ async function runDailyEditing(directory) {
   fs.symlinkSync(path.dirname(require.resolve('vue/package.json')), path.join(root, 'node_modules/vue'), 'dir')
   fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { allowJs: true, checkJs: true,
     strict: true, types: [], module: 'esnext', target: 'es2020' }, include: ['*.vue', '*.ts'] }))
-  fs.writeFileSync(path.join(root, 'Child.vue'), `<script lang="ts">export default { props: {
-    /** Display mode. */ mode: { type: String as PropType<'edit' | 'view'>, required: true, default: 'view' }
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+    vetur: { tags: 'tags.json', attributes: 'attributes.json' }
+  }))
+  fs.writeFileSync(path.join(root, 'tags.json'), JSON.stringify({
+    'acme-panel': { attributes: ['mode', 'enabled', 'saved'] }
+  }))
+  fs.writeFileSync(path.join(root, 'attributes.json'), JSON.stringify({
+    'acme-panel/mode': { type: 'string', options: ['edit', 'view'] },
+    'acme-panel/enabled': { type: 'boolean', options: [true, false] },
+    'acme-panel/saved': { type: 'event', description: 'Saved by metadata.' }
+  }))
+  fs.writeFileSync(path.join(root, 'choices.ts'), "export type Mode = 'edit' | 'view'")
+  fs.writeFileSync(path.join(root, 'barrel.ts'), "export type { Mode } from './choices'")
+  fs.writeFileSync(path.join(root, 'Child.vue'), `<script lang="ts">import type { Mode } from './barrel'
+export default { props: {
+    /** Display mode. */ mode: { type: String as PropType<Mode>, required: true, default: 'view' }
   }, emits: { /** Saved payload. */ saved(value: string) { return true } } }</script>`)
   fs.writeFileSync(path.join(root, 'InvoiceDialog.vue'), '<script>export default {}</script>')
   fs.writeFileSync(path.join(root, 'utils.ts'), 'export const kept = 1; export const unused = 2; export function formatInvoice(value: string) { return value.trim() }')
@@ -21,6 +35,7 @@ async function runDailyEditing(directory) {
 <Child :mode="'view'" @saved="run" />
 <Child :mode="form.ship" />
 <Child @saved="form.ship" />
+<AcmePanel mode="" :enabled="false" @saved="run" />
 {{ kept }}
 <Invoice />
 ul>li*3
@@ -42,6 +57,9 @@ export default { components: { Child }, data() { return { form: { shippingMode: 
   const editor = await vscode.window.showTextDocument(document)
   const config = vscode.workspace.getConfiguration('vueClick', document.uri)
   assert.equal(config.get('diagnostics.enabled'), false)
+  const initialState = await vscode.commands.executeCommand('vueClick.showProjectInfo')
+  assert.equal(initialState.state, 'not-started', 'viewing service status must not start project analysis')
+  assert.equal(initialState.automaticDiagnostics, false)
   const offset = marker => document.getText().indexOf(marker)
   const command = (name, marker, extra = 0, ...args) =>
     vscode.commands.executeCommand(name, document.uri, document.positionAt(offset(marker) + extra), ...args)
@@ -60,6 +78,17 @@ export default { components: { Child }, data() { return { form: { shippingMode: 
     assert.ok(members.items.some(value => value.label === 'shippingMode'),
       'component metadata must preserve semantic member completions in ' + marker)
   }
+  assert.equal((await vscode.commands.executeCommand('vueClick.showProjectInfo')).state, 'ready')
+  assert.equal(await vscode.commands.executeCommand('vueClick.restartLanguageService'), true)
+  assert.equal((await vscode.commands.executeCommand('vueClick.showProjectInfo')).state, 'not-started')
+  const recovered = await command('vscode.executeHoverProvider', ':mode', 2)
+  assert.match(recovered.flatMap(value => value.contents).map(value => value.value || value).join('\n'), /required/)
+  const metadataEvents = await command('vscode.executeCompletionItemProvider', ':enabled="false" @', ':enabled="false" @'.length)
+  assert.ok(metadataEvents.items.some(value => value.label === 'saved' && /Saved by metadata/.test(value.documentation?.value)))
+  const metadataValues = await command('vscode.executeCompletionItemProvider', '<AcmePanel mode="', '<AcmePanel mode="'.length)
+  assert.ok(metadataValues.items.some(value => value.label === 'edit'))
+  const primitiveValues = await command('vscode.executeCompletionItemProvider', ':enabled="', ':enabled="'.length)
+  assert.ok(primitiveValues.items.some(value => value.label === 'true' && value.insertText === 'true'))
   const imports = await command('vscode.executeCompletionItemProvider', '<Invoice', 8, undefined, 50)
   const candidate = imports.items.find(value => value.label === 'InvoiceDialog' && value.additionalTextEdits?.length)
   assert.ok(candidate, 'template component candidate must import and register')
@@ -87,7 +116,9 @@ export default { components: { Child }, data() { return { form: { shippingMode: 
   const fixes = await vscode.commands.executeCommand('vscode.executeCodeActionProvider', document.uri,
     new vscode.Range(document.positionAt(offset('formatInvoice')), document.positionAt(offset('formatInvoice') + 13)),
     vscode.CodeActionKind.QuickFix.value, 20)
-  assert.ok(fixes.some(value => value.edit?.entries().some(([, edits]) => edits.some(edit => edit.newText.includes('formatInvoice')))))
+  assert.ok(fixes.some(value => value.edit?.entries().some(([, edits]) => edits.some(edit => edit.newText.includes('formatInvoice')))),
+    JSON.stringify({ fixes: fixes.map(value => ({ title: value.title, edits: value.edit?.entries() })),
+      diagnostics: diagnostics.map(value => ({ code: value.code, text: document.getText(value.range) })) }))
   const remove = await vscode.commands.executeCommand('vscode.executeCodeActionProvider', document.uri,
     new vscode.Range(0, 0, 0, 0), 'source.removeUnusedImports', 20)
   const removal = remove.find(value => value.title === 'VueClick: 移除未使用 import')

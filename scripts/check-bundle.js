@@ -18,6 +18,7 @@ const disposable = () => ({ dispose() {} })
 const host = {
   commands: { registerCommand: disposable },
   CodeActionKind: { QuickFix: {}, SourceOrganizeImports: {}, Source: { append: () => ({}) } },
+  CodeActionTriggerKind: { Invoked: 1, Automatic: 2 },
   window: { onDidChangeActiveTextEditor: disposable, onDidChangeTextEditorSelection: disposable },
   languages: {
     registerDefinitionProvider(selector, provider) {
@@ -41,6 +42,7 @@ const host = {
     textDocuments: [],
     onDidOpenTextDocument: disposable,
     onDidChangeTextDocument: disposable,
+    onDidSaveTextDocument: disposable,
     onDidChangeConfiguration: disposable,
     onDidCloseTextDocument() {
       registrations.push('close')

@@ -30,6 +30,14 @@
       {
         "command": "vueClick.checkCurrentFile",
         "title": "VueClick: 检查当前文件"
+      },
+      {
+        "command": "vueClick.restartLanguageService",
+        "title": "VueClick: 重启语言服务"
+      },
+      {
+        "command": "vueClick.showProjectInfo",
+        "title": "VueClick: 查看项目与服务状态"
       }
     ],
     "languages": [

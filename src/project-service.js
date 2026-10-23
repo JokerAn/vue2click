@@ -233,12 +233,40 @@ function createProjectService(root, firstFile, libDirectory) {
     () => [...new Set([...projectFiles, ...buffers.keys()])].filter(file => !file.endsWith('.vue') && !file.endsWith('.d.ts')),
     loadIndex, moduleResolver, () => globalRevision)
   const libraryData = require('./library-data').createLibraryData(configRoot)
+  let metadataVersion
+  const metadataCache = new Map()
 
   async function componentMetadata(index, tag) {
-    return await require('./component-info').componentInfo(index, tag, {
-      loadIndex, resolveModule: moduleResolver
-    }) || await indirect.componentInfo(index, tag) ||
-      libraryData.components().find(component => component.name === tag) || null
+    if (metadataVersion !== projectVersion) {
+      metadataCache.clear()
+      metadataVersion = projectVersion
+    }
+    const key = `${index.fileName}:${tag}`
+    let result = metadataCache.get(key)
+    if (!result) {
+      result = (async () => {
+        const component = await require('./component-info').componentInfo(index, tag, {
+          loadIndex, resolveModule: moduleResolver
+        }) || await indirect.componentInfo(index, tag)
+        if (component) {
+          return component
+        }
+        const { kebab } = require('./component-info')
+        const components = libraryData.components()
+        return components.find(component => component.name === tag) ||
+          components.find(component => kebab(component.name) === kebab(tag)) || null
+      })()
+      metadataCache.set(key, result)
+      while (metadataCache.size > 64) {
+        metadataCache.delete(metadataCache.keys().next().value)
+      }
+      result.catch(() => {
+        if (metadataCache.get(key) === result) {
+          metadataCache.delete(key)
+        }
+      })
+    }
+    return result
   }
 
   function sync(documents) {
@@ -296,7 +324,7 @@ function createProjectService(root, firstFile, libDirectory) {
       file = normalize(file)
       projectVersion++
       globalRevision++
-      if (file.endsWith('.json')) {
+      if (libraryData.affected(file)) {
         libraryData.invalidate()
       }
       disk.delete(file)
@@ -327,6 +355,30 @@ function createProjectService(root, firstFile, libDirectory) {
     },
     async run(method, file, offset, args = {}) {
       file = normalize(file)
+      if (method === 'slotCompletions') {
+        const index = await loadIndex(file)
+        const context = index && require('./slots').slotContext(index, offset)
+        if (!context) {
+          return []
+        }
+        const info = await componentMetadata(index, context.tag)
+        const slots = info?.slots || []
+        const entries = context.kind === 'slot' ? slots : slots.find(slot => slot.name === context.slotName)?.props || []
+        return entries.filter(entry => !(context.used || []).includes(entry.name)).map(entry => ({
+          name: entry.name, kind: 'property', documentation: entry.documentation,
+          detail: context.kind === 'slot' ? `Vue slot (${entry.name})` : `Slot ${context.slotName}: ${entry.name}: ${entry.type || 'unknown'}`,
+          replacementSpan: { start: context.start, length: context.end - context.start }
+        }))
+      }
+      if (method === 'createTemplateMethod') {
+        const index = await loadIndex(file)
+        const result = index && require('./template-methods').templateMethod(index, offset, args)
+        if (!result || service.getDefinitionAtPosition(file, offset)?.length) {
+          return null
+        }
+        const inherited = await indirect.completions(index, offset)
+        return inherited.some(entry => entry.name === result.name) ? null : result.changes
+      }
       if (method === 'templateCompletions') {
         const index = await loadIndex(file)
         if (!index) {
@@ -449,7 +501,7 @@ function createProjectService(root, firstFile, libDirectory) {
       throw new Error(`Unknown language request: ${method}`)
     },
     files: () => [...roots].filter(file => file !== typesFile),
-    dispose: () => { service.dispose(); disk.clear(); buffers.clear(); indexes.clear() }
+    dispose: () => { service.dispose(); disk.clear(); buffers.clear(); indexes.clear(); metadataCache.clear() }
   }
 }
 

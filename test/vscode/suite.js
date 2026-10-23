@@ -306,6 +306,35 @@ async function checkRealFile(file, grammars) {
     importTargets.push({ sourceLine: document.positionAt(reference.index).line + 1,
       targetLine: target.positionAt(declarationOffset).line + 1 })
   }
+  let styleChecks = 0
+  const { findStyleDefinitions } = require('../../src/style-navigation')
+  for (const tag of index.tags) {
+    if (styleChecks >= 5) {
+      break
+    }
+    for (const attribute of tag.attributes) {
+      const raw = before.slice(attribute.start, attribute.end)
+      if (!/^class\s*=/.test(raw)) {
+        continue
+      }
+      const value = /["']([^"']+)["']/.exec(raw)
+      if (!value) {
+        continue
+      }
+      const offset = attribute.start + value.index + 1
+      const expected = await findStyleDefinitions(index, offset)
+      if (!expected.length) {
+        continue
+      }
+      const actual = await vscode.commands.executeCommand('vscode.executeDefinitionProvider',
+        document.uri, document.positionAt(offset))
+      assert.ok(expected.every(entry => actual.some(hit => hit.uri.fsPath === entry.fileName &&
+        document.offsetAt(hit.range.start) === entry.textSpan.start)), 'real template classes must navigate to their styles')
+      styleChecks++
+      break
+    }
+  }
+  assert.ok(styleChecks > 0, 'real file must exercise template-to-style definitions')
   const registry = await grammarRegistry(grammars)
   let grammarMs
   try {
@@ -325,7 +354,8 @@ async function checkRealFile(file, grammars) {
   console.log('Real-file standalone measurements: ' + JSON.stringify({
     file, vscode: vscode.version, lines: document.lineCount, bytes: Buffer.byteLength(before),
     openMs: +openMs.toFixed(3), local, completion, crossFile,
-    fullGrammarMs: +grammarMs.toFixed(3), crossFileProps: props.length, importedFunctionTargets: importTargets, unchanged: true
+    fullGrammarMs: +grammarMs.toFixed(3), crossFileProps: props.length, importedFunctionTargets: importTargets,
+    styleChecks, unchanged: true
   }))
 }
 

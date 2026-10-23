@@ -130,6 +130,7 @@ $brand: #ff0000;
   await config.update('languageService.enabled', undefined, vscode.ConfigurationTarget.Workspace)
   await config.update('diagnostics.enabled', undefined, vscode.ConfigurationTarget.Workspace)
   await require('./daily-editing').runDailyEditing(directory)
+  await require('./template-productivity').runTemplateProductivity(directory)
   console.log('Advanced Vue2 editing checks passed on VS Code ' + vscode.version)
 }
 

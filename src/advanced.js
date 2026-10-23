@@ -227,6 +227,11 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         return undefined
       }
       const index = documentIndex(document)
+      const slot = require('./slots').slotContext(index, document.offsetAt(position))
+      if (slot) {
+        const items = await query('slotCompletions', document, position, token) || []
+        return new vscode.CompletionList(items.map(value => completeItem(value, document)), false)
+      }
       const entry = embedded.at(document, index, position)
       const template = require('./template-editing').templateContext(index, document.offsetAt(position))
       let templateItems = []
@@ -292,7 +297,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         vscode.TextEdit.replace(span(value.document, edit.span), edit.newText)))
       return item
     }
-  }, '.', '<', ':', '@', '"', "'", '/', '-')
+  }, '.', '<', ':', '@', '"', "'", '/', '-', '#', '{', ',')
   register('registerDocumentFormattingEditProvider', selector, {
     provideDocumentFormattingEdits(document, options) {
       if (!vscode.workspace.getConfiguration('vueClick', document.uri).get('formatting.enabled', true)) {
@@ -406,6 +411,33 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   })
   const diagnostics = vscode.languages.createDiagnosticCollection('vueClick')
   const timers = new Map()
+  let output
+  context.subscriptions.push(vscode.commands.registerCommand('vueClick.restartLanguageService', () => {
+    for (const timer of timers.values()) {
+      clearTimeout(timer)
+    }
+    timers.clear()
+    client.invalidate()
+    diagnostics.clear()
+    vscode.window.showInformationMessage('VueClick 语言服务已释放，将在下次请求时重新启动。')
+    return true
+  }), vscode.commands.registerCommand('vueClick.showProjectInfo', () => {
+    const document = vscode.window.activeTextEditor?.document
+    const info = {
+      file: document?.uri.scheme === 'file' ? document.fileName : undefined,
+      languageServiceEnabled: document ? enabled(document) : undefined,
+      automaticDiagnostics: document ? vscode.workspace.getConfiguration('vueClick', document.uri).get('diagnostics.enabled', false) : undefined,
+      ...client.status(document)
+    }
+    if (!output) {
+      output = vscode.window.createOutputChannel('VueClick')
+      context.subscriptions.push(output)
+    }
+    output.clear()
+    output.appendLine(JSON.stringify(info, null, 2))
+    output.show(true)
+    return info
+  }))
   context.subscriptions.push(vscode.commands.registerCommand('vueClick.checkCurrentFile', async () => {
     const document = vscode.window.activeTextEditor?.document
     if (!document || document.languageId !== 'vue' || document.uri.scheme !== 'file') {
@@ -442,7 +474,30 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
           }
         }
       }
+      if (!sourceOnly && (!context.only || context.only.contains(vscode.CodeActionKind.QuickFix)) &&
+        context.triggerKind !== vscode.CodeActionTriggerKind.Automatic) {
+        const index = documentIndex(document)
+        const candidate = require('./template-methods').templateMethod(index, document.offsetAt(selection.start))
+        if (candidate) {
+          const changes = enabled(document)
+            ? await query('createTemplateMethod', document, selection.start, token, {
+              tabSize: vscode.workspace.getConfiguration('editor', document.uri).get('tabSize', 2),
+              insertSpaces: vscode.workspace.getConfiguration('editor', document.uri).get('insertSpaces', true)
+            }) : candidate.changes
+          if (changes && !token?.isCancellationRequested) {
+            const action = new vscode.CodeAction(`VueClick: 生成方法 ${candidate.name}`, vscode.CodeActionKind.QuickFix)
+            action.edit = workspaceEdit(document, changes)
+            if (action.edit) {
+              actions.push(action)
+            }
+          }
+        }
+      }
       const errors = context.diagnostics.filter(value => [2304, 2552, 6133, 6192].includes(Number(value.code)))
+      if (!sourceOnly && !errors.length && context.triggerKind !== vscode.CodeActionTriggerKind.Automatic) {
+        errors.push(...(diagnostics.get(document.uri) || []).filter(value =>
+          [2304, 2552, 6133, 6192].includes(Number(value.code)) && value.range.intersection(selection)))
+      }
       if (!sourceOnly && errors.length) {
         const fixes = await query('codeFixes', document, selection.start, token,
           { end: document.offsetAt(selection.end), codes: errors.map(value => Number(value.code)) }) || []
@@ -535,6 +590,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       timers.delete(document.uri.toString())
       embedded.close(document)
       diagnostics.delete(document.uri)
+      client.close(document)
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event?.affectsConfiguration && !event.affectsConfiguration('vueClick')) {
@@ -546,6 +602,12 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       }
     }),
     { dispose() { for (const timer of timers.values()) { clearTimeout(timer) } } })
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(document => {
+    // The main watcher covers source and JSON files. Vetur metadata can use another extension.
+    if (document.uri.scheme === 'file' && !/\.(?:json|vue|[cm]?[jt]sx?)$/i.test(document.fileName)) {
+      client.fileChanged(document.fileName, 'change')
+    }
+  }))
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(editor => {
     if (editor) {
       schedule(editor.document)
@@ -571,7 +633,37 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   }
   return {
     async definitions(document, position, token) {
-      const entry = embedded.at(document, documentIndex(document), position)
+      const index = documentIndex(document)
+      const versions = new Map([[document, document.version]])
+      const cancelled = () => token?.isCancellationRequested ||
+        [...versions].some(([source, version]) => source.isClosed || source.version !== version)
+      const styles = await require('./style-navigation').findStyleDefinitions(index, document.offsetAt(position), {
+        isCancelled: cancelled,
+        async readFile(fileName) {
+          if (cancelled()) {
+            return null
+          }
+          let target = vscode.workspace.textDocuments.find(source => source.fileName === fileName && !source.isClosed)
+          if (!target) {
+            const stat = await require('node:fs/promises').stat(fileName)
+            if (stat.size > 256 * 1024 || cancelled()) {
+              return null
+            }
+            target = await vscode.workspace.openTextDocument(vscode.Uri.file(fileName))
+          }
+          versions.set(target, target.version)
+          const text = target.getText(new vscode.Range(target.positionAt(0), target.positionAt(256 * 1024 + 1)))
+          return text.length <= 256 * 1024 ? text : null
+        }
+      })
+      if (cancelled()) {
+        return []
+      }
+      if (styles.length) {
+        const values = await Promise.all(styles.map(location))
+        return cancelled() ? [] : values
+      }
+      const entry = embedded.at(document, index, position)
       if (entry && entry.language !== 'html') {
         const result = entry.service.findDefinition(entry.document, position, entry.parsed)
         return result ? [new vscode.Location(vscode.Uri.parse(result.uri), range(result.range))] : []
