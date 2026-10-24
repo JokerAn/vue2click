@@ -351,33 +351,28 @@ async function findStyleDefinitions(index, offset, context = {}) {
     const entry = queue[at]
     const specifier = entry.specifier
     if (entry.depth > 8 || typeof specifier !== 'string' || specifier.length > 4096 ||
-      !/^\.\.?\//.test(specifier) || /[\0\r\n\\!?#]/.test(specifier) || !path.isAbsolute(entry.from)) {
+      (!context.resolveStyleFile && !/^\.\.?\//.test(specifier)) || /[\0\r\n\\!?#]/.test(specifier) || !path.isAbsolute(entry.from)) {
       continue
     }
-    const candidate = path.resolve(path.dirname(entry.from), specifier)
-    const extension = path.extname(candidate)
-    const candidates = stylesheetExtension.test(candidate) ? [candidate] :
-      extension ? [] : ['.css', '.scss', '.less'].map(suffix => candidate + suffix)
-    for (const fileName of candidates) {
-      if (seen.has(fileName) || reads >= 64 || cancelled()) {
-        continue
+    const probe = async candidate => {
+      const extension = path.extname(candidate)
+      const candidates = stylesheetExtension.test(candidate) ? [candidate] :
+        extension ? [] : ['.css', '.scss', '.less'].map(suffix => candidate + suffix)
+      for (const fileName of candidates) {
+        if (seen.has(fileName) || reads >= 64 || cancelled()) continue
+        seen.add(fileName)
+        reads++
+        let text
+        try { text = await context.readFile?.(fileName) } catch { text = null }
+        if (cancelled()) return null
+        if (typeof text === 'string') return { fileName, text }
       }
-      seen.add(fileName)
-      reads++
-      let text
-      try {
-        text = await context.readFile?.(fileName)
-      } catch {
-        text = null
-      }
-      if (cancelled()) {
-        return []
-      }
-      if (typeof text === 'string') {
-        scan(text, path.extname(fileName).slice(1).toLowerCase(), fileName, 0, entry.depth)
-        break
-      }
+      return null
     }
+    const found = context.resolveStyleFile ? await context.resolveStyleFile(specifier, entry.from, probe) :
+      await probe(path.resolve(path.dirname(entry.from), specifier))
+    if (cancelled()) return []
+    if (found) scan(found.text, path.extname(found.fileName).slice(1).toLowerCase(), found.fileName, 0, entry.depth)
   }
   if (cancelled()) {
     return []

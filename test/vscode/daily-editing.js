@@ -139,6 +139,7 @@ export default { components: { Child }, data() { return { form: { shippingMode: 
   }
   assert.match(document.getText(), /<div><\/div>/)
   assert.equal(document.getText().match(/<\/div>/g).length, 1)
+  const previousClosing = config.inspect('autoClosingTags.enabled')?.workspaceValue
   await config.update('autoClosingTags.enabled', false, vscode.ConfigurationTarget.Workspace)
   const empty = new vscode.WorkspaceEdit()
   const divClose = document.positionAt(document.getText().indexOf('</div>'))
@@ -149,6 +150,7 @@ export default { components: { Child }, data() { return { form: { shippingMode: 
   await vscode.commands.executeCommand('type', { text: '>' })
   await new Promise(resolve => setTimeout(resolve, 100))
   assert.ok(!document.getText().includes('<span></span>'), 'auto close setting must be respected')
+  await config.update('autoClosingTags.enabled', previousClosing, vscode.ConfigurationTarget.Workspace)
   console.log('Daily editing checks passed: metadata, imports, script navigation, diagnostics, fixes, Emmet and closing tags')
 }
 

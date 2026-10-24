@@ -9,6 +9,15 @@ const vscode = require('vscode')
 const { grammarRegistry, tokens } = require('../helpers/grammar')
 
 async function run() {
+  // Editor commands need real window focus; do not fake editor context keys.
+  if ((await vscode.commands.getCommands(true)).includes('workbench.action.focusWindow')) {
+    await vscode.commands.executeCommand('workbench.action.focusWindow')
+  }
+  const focusDeadline = Date.now() + 5000
+  while (!vscode.window.state.focused && Date.now() < focusDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  assert.ok(vscode.window.state.focused, 'editor-host operation tests require a focused test window')
   const extension = vscode.extensions.getExtension('jokeran.vueClick')
   assert.ok(extension, 'development extension must be registered')
   await extension.activate()
@@ -16,6 +25,14 @@ async function run() {
     assert.equal(vscode.extensions.getExtension(other), undefined, 'standalone tests must not load ' + other)
   }
   const directory = process.env.VUECLICK_TEST_WORKSPACE
+  if (process.env.VUECLICK_PATH_TEST_ONLY === '1') {
+    await require('./path-consistency').runPathConsistency(directory)
+    return
+  }
+  if (process.env.VUECLICK_OPERATION_TEST_ONLY === '1') {
+    await require('./operation-acceptance').runOperationAcceptance(directory)
+    return
+  }
   const childFile = path.join(directory, 'AddressTab.vue')
   fs.writeFileSync(childFile, `<script>export default { props: ['addressParams'] }</script>`)
   const content = `<template>
@@ -75,7 +92,8 @@ export default {
       await vscode.workspace.applyEdit(restore)
       await new Promise(resolve => setTimeout(resolve, 50))
     } while (Date.now() < deadline)
-    assert.fail(`${marker} must use ${expected} comments; actual: ${actual}`)
+    assert.fail(`${marker} must use ${expected} comments; actual: ${actual}; focused=${vscode.window.state.focused}; ` +
+      `active=${vscode.window.activeTextEditor?.document.uri.toString()}; selection=${JSON.stringify(editor.selection)}; expected=${JSON.stringify(position)}`)
   }
   await assertComment('this.count', '//')
   await complete(content, 'this.')
@@ -199,6 +217,8 @@ export default {
     console.log('Advanced Vue2 integration failure: ' + (error.stack || error))
     throw error
   }
+  await require('./path-consistency').runPathConsistency(directory)
+  await require('./operation-acceptance').runOperationAcceptance(directory)
   console.log(`VueClick extension-host checks passed on VS Code ${vscode.version}`)
 }
 

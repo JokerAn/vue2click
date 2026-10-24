@@ -10,13 +10,15 @@ async function main() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-vscode-'))
   try {
     await runTests({
-      // Set VSCODE_TEST_VERSION=1.90.2 to check the declared minimum version.
+      // Set VSCODE_TEST_VERSION=1.90.0 to check the declared minimum version.
       version: process.env.VSCODE_TEST_VERSION || 'stable',
       vscodeExecutablePath: process.env.VSCODE_EXECUTABLE_PATH,
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(root, 'test/vscode/suite.js'),
       extensionTestsEnv: {
         VUECLICK_TEST_WORKSPACE: directory,
+        VUECLICK_PATH_TEST_ONLY: process.env.VUECLICK_PATH_TEST_ONLY || '',
+        VUECLICK_OPERATION_TEST_ONLY: process.env.VUECLICK_OPERATION_TEST_ONLY || '',
         VUECLICK_TEST_FILE: process.env.VUECLICK_TEST_FILE || ''
       },
       launchArgs: [

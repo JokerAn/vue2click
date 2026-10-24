@@ -148,6 +148,32 @@ test('multiple config bases merge only fields actually supplied by each base', a
   assert.equal(await f.resolve('component/Child'), path.join(f.root, 'src/components/Child.vue'))
 })
 
+test('configDir templates in inherited paths and baseUrl use the consuming configuration directory', async t => {
+  const f = await fixture(t, {
+    'configs/base.json': { compilerOptions: { paths: { 'component/*': ['${configDir}/src/components/*'] } } },
+    'tsconfig.json': { extends: './configs/base' },
+    'src/components/Child.vue': ''
+  })
+  const child = path.join(f.root, 'src/components/Child.vue')
+  assert.equal(await f.resolve('component/Child'), child)
+  await f.write('configs/base.json', JSON.stringify({ compilerOptions: {
+    baseUrl: '${configDir}/src', paths: { 'component/*': ['components/*'] }
+  } }))
+  assert.equal(await f.resolve('component/Child'), child)
+})
+
+test('configDir substitution follows TypeScript prefix-only and single-substitution rules', async t => {
+  const f = await fixture(t, {
+    'jsconfig.json': { compilerOptions: { paths: {
+      'literal/*': ['literal/${configDir}/*'], 'repeated/*': ['${configDir}/${configDir}/*']
+    } } },
+    'literal/${configDir}/Child.vue': '',
+    '${configDir}/Child.vue': ''
+  })
+  assert.equal(await f.resolve('literal/Child'), path.join(f.root, 'literal/${configDir}/Child.vue'))
+  assert.equal(await f.resolve('repeated/Child'), path.join(f.root, '${configDir}/Child.vue'))
+})
+
 test('a shared traversal budget bounds repeated extends branches and prevents partial alias fallback', { timeout: 3000 }, async t => {
   const files = {
     'tsconfig.json': { extends: './configs/c0.json', compilerOptions: { paths: { 'component/*': ['src/components/*'] } } },

@@ -181,6 +181,21 @@ test('self-closing style src loads only real top-level SFC blocks', async () => 
   ])
 })
 
+test('style navigation follows configured aliases through style sources, script imports and nested imports', async () => {
+  const text = '<template><div class="card" /></template><style src="@src/base.scss"/><script>import "@src/theme.scss"</script>'
+  const files = { '/app/src/base.scss': '@import "@src/nested.scss"; .card {}', '/app/src/theme.scss': '.card {}', '/app/src/nested.scss': '.card {}' }
+  const resolutions = []
+  const result = await findStyleDefinitions(vue(text), text.indexOf('card'), {
+    resolveStyleFile: async (specifier, from, probe) => {
+      resolutions.push([specifier, from])
+      return probe('/app/src/' + specifier.slice('@src/'.length))
+    },
+    readFile: async file => files[file] ?? null
+  })
+  assert.deepEqual(result.map(value => value.fileName), ['/app/src/base.scss', '/app/src/theme.scss', '/app/src/nested.scss'])
+  assert.ok(resolutions.some(([specifier, from]) => specifier === '@src/nested.scss' && from === '/app/src/base.scss'))
+})
+
 test('imports are declaration only, relative, bounded, soft failing and do not execute project configuration', async () => {
   const text = `<template><div class="card" /></template><style>
     /* @import "./comment.css"; */

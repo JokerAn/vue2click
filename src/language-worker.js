@@ -14,7 +14,7 @@ parentPort.on('message', message => {
       project ||= createProjectService(workerData.root, workerData.firstFile, workerData.libDirectory)
       project.sync(message.documents)
       const result = await project.run(message.method, message.fileName, message.offset, message.args)
-      parentPort.postMessage({ id: message.id, result })
+      parentPort.postMessage({ id: message.id, result, configuration: project.configuration() })
     } catch (error) {
       parentPort.postMessage({ id: message.id, error: error.stack || String(error) })
     }

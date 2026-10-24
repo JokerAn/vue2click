@@ -1,7 +1,7 @@
 'use strict'
 
 const ts = require('typescript')
-const { parse, NodeTypes } = require('@vue/compiler-dom')
+const { parse, NodeTypes, ErrorCodes } = require('@vue/compiler-dom')
 const { EntityDecoder, DecodingMode, htmlDecodeTree } = require('entities/decode')
 
 // Decode HTML entities while retaining both directions of the source offset map.
@@ -65,20 +65,46 @@ function buildTemplateIndex(text, buildExpressionIndex) {
   const expressions = []
   const references = []
   const blocks = []
+  const blockSources = []
   const tags = []
   const texts = []
   // Identical expressions use the same syntax tree within this document
   // version. Their Vue offsets and template-local scopes remain separate.
   const expressionIndexes = new Map()
-  const result = { expressions, references, blocks, tags, texts }
+  const result = { expressions, references, blocks, blockSources, tags, texts }
   // Recover from unfinished markup while the user is typing.
   let root
-  try { root = parse(text, { onError() {} }) } catch { return result }
-  for (const node of root.children) {
+  let unfinishedTag = false
+  try { root = parse(text, { onError(error) { unfinishedTag ||= error.code === ErrorCodes.EOF_IN_TAG } }) } catch { return result }
+  const sourceNodes = [...root.children]
+  if (unfinishedTag) {
+    const start = text.lastIndexOf('<')
+    const opening = text.slice(start)
+    const value = /^<style\b/.test(opening) && /\ssrc\s*=\s*(?:"([^"]*)|'([^']*))$/.exec(opening)
+    if (value) {
+      // Repair only an EOF attribute, and let the parser prove it is top-level.
+      try {
+        const repaired = parse(text + (value[1] !== undefined ? '"' : "'") + '/>', { onError() {} })
+        const node = repaired.children.find(node => node.type === NodeTypes.ELEMENT && node.tag === 'style' && node.loc.start.offset === start)
+        if (node) sourceNodes.push(node)
+      } catch (_) {}
+    }
+  }
+  for (const node of sourceNodes) {
     if (node.type !== NodeTypes.ELEMENT) {
       continue
     }
     const opening = node.loc.source.match(/^<[\w-]+\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/)
+    const source = node.props.find(prop => prop.type === NodeTypes.ATTRIBUTE && prop.name === 'src')?.value
+    if (source) {
+      const quoted = /^['"]/.test(source.loc.source)
+      const closed = !quoted || text[source.loc.end.offset - 1] === source.loc.source[0]
+      const start = source.loc.start.offset + Number(quoted)
+      const end = Math.min(text.length, source.loc.end.offset - Number(quoted && closed))
+      blockSources.push({ tag: node.tag,
+        lang: node.props.find(prop => prop.type === NodeTypes.ATTRIBUTE && prop.name === 'lang')?.value?.content,
+        reference: text.slice(start, end), start, end, closed })
+    }
     if (!opening || node.isSelfClosing) {
       continue
     }

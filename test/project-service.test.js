@@ -7,7 +7,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { createProjectService } = require('../src/project-service')
 
-function fixture(t, files) {
+function fixture(t, files, entry = 'Parent.vue') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-semantic-'))
   fs.mkdirSync(path.join(root, 'node_modules'), { recursive: true })
   fs.symlinkSync(path.dirname(require.resolve('vue/package.json')), path.join(root, 'node_modules/vue'), 'dir')
@@ -16,14 +16,49 @@ function fixture(t, files) {
     include: ['**/*.vue', '**/*.ts', '**/*.js']
   }))
   for (const [name, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true })
     fs.writeFileSync(path.join(root, name), text)
   }
-  const file = path.join(root, 'Parent.vue')
+  const file = path.join(root, entry)
   const service = createProjectService(root, file)
   t.after(() => { service.dispose(); fs.rmSync(root, { recursive: true, force: true }) })
-  service.sync([{ fileName: file, version: 1, text: files['Parent.vue'] }])
+  service.sync([{ fileName: file, version: 1, text: files[entry] }])
   return { root, file, service }
 }
+
+test('semantic members use a nearer jsconfig instead of an outer tsconfig', async t => {
+  const text = '<script>import { form } from "@src/model"; export default { data() { return { form } }, methods: { run() { this.form. } } }</script>'
+  const { root, file, service } = fixture(t, {
+    'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@src/*': ['outer/*'] } } }),
+    'outer/model.js': 'export const form = { wrongOuterField: 1 }',
+    'client/jsconfig.json': JSON.stringify({ compilerOptions: { allowJs: true, baseUrl: '.', paths: { '@src/*': ['src/*'] } } }),
+    'client/src/model.js': 'export const form = { correctLocalField: 1 }',
+    'client/Parent.vue': text
+  }, 'client/Parent.vue')
+  const definitions = await service.run('definitions', file, text.indexOf('form') + 1)
+  assert.ok(definitions.some(value => value.fileName === path.join(root, 'client/src/model.js')))
+  const members = (await service.run('completion', file, text.indexOf('this.form.') + 'this.form.'.length)).entries
+  assert.ok(members.some(value => value.name === 'correctLocalField'))
+  assert.ok(!members.some(value => value.name === 'wrongOuterField'))
+})
+
+test('an inferred workspace does not inherit a config outside its boundary', async t => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-config-boundary-'))
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true }))
+  const root = path.join(outer, 'workspace')
+  fs.mkdirSync(root)
+  fs.writeFileSync(path.join(outer, 'tsconfig.json'), JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@src/*': ['outer/*'] } } }))
+  fs.mkdirSync(path.join(outer, 'outer'))
+  fs.writeFileSync(path.join(outer, 'outer/model.js'), 'export const model = 1')
+  const text = 'import { model } from "@src/model"; model'
+  const file = path.join(root, 'Page.js')
+  fs.writeFileSync(file, text)
+  const service = createProjectService(root, file)
+  t.after(() => service.dispose())
+  service.sync([{ fileName: file, version: 1, text }])
+  const definitions = await service.run('definitions', file, text.lastIndexOf('model') + 1)
+  assert.ok(definitions.every(value => !value.fileName.startsWith(path.join(outer, 'outer') + path.sep)))
+})
 
 test('slot completions read explicit child payload names and update after unsaved edits', async t => {
   const text = `<template><Child><template #row="{ it }"/></Child></template><script>
@@ -71,6 +106,21 @@ import Child from './Child.vue'; export default { components: { Child } }</scrip
   }])
   assert.ok(!(await service.run('componentHover', file, position)).text.includes('required'))
   assert.equal(calls, 2, 'changed child contracts must be reparsed')
+})
+
+test('a newly created aliased component refreshes static contract module caches', async t => {
+  const text = '<template><Later :mode="" /></template><script>import Later from "@src/Later.vue"; export default { components: { Later } }</script>'
+  const { root, file, service } = fixture(t, {
+    'tsconfig.json': JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@src/*': ['src/*'] } } }),
+    'Parent.vue': text
+  })
+  const offset = text.indexOf(':mode="') + ':mode="'.length
+  assert.ok(!(await service.run('templateCompletions', file, offset)).some(value => value.name === '"edit"'))
+  const child = path.join(root, 'src/Later.vue')
+  fs.mkdirSync(path.dirname(child))
+  fs.writeFileSync(child, '<script>export default { props: { mode: { type: String, validator: value => ["edit", "view"].includes(value) } } }</script>')
+  service.invalidate(child, 'create')
+  assert.ok((await service.run('templateCompletions', file, offset)).some(value => value.name === '"edit"'))
 })
 
 test('project metadata refreshes after its JSON file changes', async t => {

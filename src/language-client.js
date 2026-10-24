@@ -3,17 +3,14 @@
 const { Worker } = require('node:worker_threads')
 const path = require('node:path')
 const fs = require('node:fs')
+const { findNearestConfig, ancestors, fileStamp: stamp } = require('./project-config')
 
-function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 5 * 60 * 1000 } = {}) {
+function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 5 * 60 * 1000, onConfigFiles } = {}) {
   const projects = new Map()
   let sequence = 0
-  function stamp(file) {
-    try {
-      const stat = fs.statSync(file)
-      return `${stat.mtimeMs}:${stat.size}`
-    } catch {
-      return 'missing'
-    }
+  function notifyConfigFiles() {
+    onConfigFiles?.([...new Set([...projects.values()].filter(project => !project.disposed)
+      .flatMap(project => [...project.configs.keys()]))])
   }
   function dispose(project) {
     project.disposed = true
@@ -26,6 +23,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
       pending.dispose()
     }
     project.pending.clear()
+    notifyConfigFiles()
   }
   function idle(project) {
     clearTimeout(project.idleTimer)
@@ -77,16 +75,14 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
   }
   function rootFor(document) {
     const workspace = vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath
-    for (let directory = path.dirname(document.fileName);;) {
-      if (['tsconfig.json', 'jsconfig.json', 'package.json'].some(file => fs.existsSync(path.join(directory, file)))) {
+    const config = findNearestConfig(document.fileName, workspace)
+    if (config) return path.dirname(config)
+    for (const directory of ancestors(path.dirname(document.fileName), workspace)) {
+      if (fs.existsSync(path.join(directory, 'package.json'))) {
         return directory
       }
-      const parent = path.dirname(directory)
-      if (directory === workspace || directory === parent) {
-        return workspace || path.dirname(document.fileName)
-      }
-      directory = parent
     }
+    return workspace || path.dirname(document.fileName)
   }
   const bundledWorker = path.join(context.extensionPath || path.resolve(__dirname, '..'), 'dist/language-worker.cjs')
   return {
@@ -102,6 +98,11 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
         return undefined
       }
       let project = projects.get(root)
+      if (project && [...project.configs].some(([file, version]) => stamp(file) !== version)) {
+        dispose(project)
+        projects.delete(root)
+        project = undefined
+      }
       if (!project) {
         const workerPath = fs.existsSync(bundledWorker) ? bundledWorker : path.join(__dirname, 'language-worker.js')
         const libDirectory = path.join(path.dirname(bundledWorker), 'typescript')
@@ -121,6 +122,16 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
         }
         const current = project
         project.worker.on('message', response => {
+          if (current.disposed) return
+          if (response.configuration) {
+            if (response.configuration.some(entry => stamp(entry.fileName) !== entry.stamp)) {
+              dispose(current)
+              if (projects.get(root) === current) projects.delete(root)
+              return
+            }
+            for (const entry of response.configuration) current.configs.set(path.resolve(entry.fileName), entry.stamp)
+            notifyConfigFiles()
+          }
           const pending = current.pending.get(response.id)
           if (pending) {
             current.pending.delete(response.id)
@@ -152,6 +163,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
         project.worker.on('error', failed)
         project.worker.on('exit', code => failed(new Error(`VueClick language worker exited (${code}).`)))
         projects.set(root, project)
+        notifyConfigFiles()
         while (projects.size > 1) {
           const oldest = projects.keys().next().value
           dispose(projects.get(oldest))
@@ -248,11 +260,12 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
       }
     },
     fileChanged(fileName, kind) {
+      fileName = path.resolve(fileName)
       for (const [root, project] of projects) {
-        if (fileName.startsWith(root + path.sep)) {
-          const configChanged = /(?:^|\/)(?:(?:tsconfig|jsconfig|package)\.json|\.gitignore)$/.test(fileName)
+        if (project.configs.has(fileName) || fileName.startsWith(root + path.sep)) {
+          const configChanged = project.configs.has(fileName)
           if (configChanged) {
-            if (configChanged && project.configs.get(fileName) === stamp(fileName)) {
+            if (project.configs.get(fileName) === stamp(fileName)) {
               continue
             }
             dispose(project)
@@ -260,6 +273,17 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
           } else {
             project.worker.postMessage({ method: 'invalidate', fileName, kind })
           }
+        }
+      }
+    },
+    isConfigDependency(fileName) {
+      return [...projects.values()].some(project => project.configs.has(path.resolve(fileName)))
+    },
+    configDocumentChanged(fileName) {
+      for (const [root, project] of projects) {
+        if (project.configs.has(path.resolve(fileName))) {
+          dispose(project)
+          projects.delete(root)
         }
       }
     },

@@ -5,11 +5,30 @@ const { createEmbeddedService } = require('./embedded')
 const { declarationInfo, documentSymbols, nodeAt } = require('./insight')
 const { scriptFolding, scriptSelection, scriptFormatting, scriptHighlights } = require('./script-editing')
 const path = require('node:path')
-const { pathToFileURL, fileURLToPath } = require('node:url')
+const { createResourceResolver, resourceReferences, localReference, urlContext, isSourceFile } = require('./resource-paths')
+const { nativePathFolders, RESOURCE_DIRECTORY_DETAIL } = require('./native-paths')
 
 function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
-  const client = createLanguageClient(vscode, context)
+  const configWatchers = new Map()
+  const client = createLanguageClient(vscode, context, undefined, {
+    onConfigFiles(files) {
+      if (!vscode.workspace.createFileSystemWatcher || !vscode.RelativePattern) return
+      for (const [file, watcher] of configWatchers) {
+        if (!files.includes(file)) { watcher.dispose(); configWatchers.delete(file) }
+      }
+      for (const file of files) {
+        if (configWatchers.has(file)) continue
+        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.dirname(file), path.basename(file)))
+        watcher.onDidCreate(() => client.fileChanged(file, 'create'))
+        watcher.onDidChange(() => client.fileChanged(file, 'change'))
+        watcher.onDidDelete(() => client.fileChanged(file, 'delete'))
+        configWatchers.set(file, watcher)
+      }
+    }
+  })
+  context.subscriptions.push({ dispose() { for (const watcher of configWatchers.values()) watcher.dispose(); configWatchers.clear() } })
   const embedded = createEmbeddedService()
+  const nativeDirectoryProbes = new WeakSet()
   require('./tag-closing').registerTagClosing(vscode, context, documentIndex, embedded)
   const selector = [{ language: 'vue', scheme: 'file' }]
   const hoverSelector = ['vue', 'javascript', 'javascriptreact', 'typescript', 'typescriptreact']
@@ -17,14 +36,13 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   const range = value => new vscode.Range(value.start.line, value.start.character, value.end.line, value.end.character)
   const span = (document, value) => new vscode.Range(document.positionAt(value.start), document.positionAt(value.start + value.length))
   const enabled = document => vscode.workspace.getConfiguration('vueClick', document.uri).get('languageService.enabled', true)
-  const documentContext = {
-    resolveReference(reference, base) {
-      try {
-        return new URL(reference, base).toString()
-      } catch {
-        return pathToFileURL(path.resolve(path.dirname(fileURLToPath(base)), reference)).toString()
-      }
-    }
+  const documentContext = urlContext
+  function resourceContext(document, token) {
+    const version = document.version
+    return createResourceResolver({
+      workspaceRoot: vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath,
+      isCancelled: () => Boolean(token?.isCancellationRequested || document.isClosed || document.version !== version)
+    })
   }
   function markdown(value) {
     const result = new vscode.MarkdownString(value || '')
@@ -51,7 +69,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   }
   function completeItem(entry, document, defaultRange) {
     const kinds = { method: 'Method', function: 'Function', class: 'Class', interface: 'Interface',
-      property: 'Property', const: 'Constant', var: 'Variable', let: 'Variable', alias: 'Reference', keyword: 'Keyword' }
+      property: 'Property', const: 'Constant', var: 'Variable', let: 'Variable', alias: 'Reference', keyword: 'Keyword', folder: 'Folder', directory: 'Folder', file: 'File', script: 'File' }
     const item = new vscode.CompletionItem(entry.name || entry.label, vscode.CompletionItemKind[kinds[entry.kind] || 'Property'])
     item.detail = entry.detail || entry.source
     item.sortText = entry.sortText
@@ -64,6 +82,12 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
     }
     const insert = entry.insertText || entry.textEdit?.newText || entry.name || entry.label
     item.insertText = entry.isSnippet || entry.insertTextFormat === 2 ? new vscode.SnippetString(insert) : insert
+    if (entry.kind === 'directory') {
+      const existingSlash = item.range && document.getText(new vscode.Range(item.range.end,
+        document.positionAt(document.offsetAt(item.range.end) + 1))) === '/'
+      item.insertText = insert + (insert.endsWith('/') || existingSlash ? '' : '/')
+      item.command = { command: 'editor.action.triggerSuggest', title: 'Continue directory path' }
+    }
     if (entry.documentation) {
       item.documentation = markdown(typeof entry.documentation === 'string' ? entry.documentation : entry.documentation.value)
     }
@@ -221,12 +245,58 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         [...targets].some(([target, targetVersion]) => target.version !== targetVersion) ? undefined : result
     }
   })
-  register('registerCompletionItemProvider', selector, {
-    async provideCompletionItems(document, position, token) {
+  register('registerCompletionItemProvider', hoverSelector, {
+    async provideCompletionItems(document, position, token, completionContext) {
+      if (token?.isCancellationRequested) return undefined
       if (!vscode.workspace.getConfiguration('vueClick', document.uri).get('completion.enabled', true)) {
         return undefined
       }
       const index = documentIndex(document)
+      const version = document.version
+      const offset = document.offsetAt(position)
+      const resource = resourceReferences(index, embedded.entries(document, index))
+        .find(value => offset >= value.start && offset <= value.end)
+      if (resource && (!resource.sourceModule || index.text.slice(resource.start, offset).includes('/'))) {
+        const before = index.text.slice(resource.start, offset)
+        const slash = before.lastIndexOf('/')
+        const end = index.text.indexOf('/', offset)
+        const completionEnd = resource.closed === false ? offset : end >= offset && end < resource.end ? end : resource.end
+        const replacementSpan = { start: resource.start + slash + 1, length: completionEnd - resource.start - slash - 1 }
+        const completion = before === '' || localReference(before) ? await resourceContext(document, token).completePaths(before, document.fileName) : { items: [] }
+        if (document.version !== version || token?.isCancellationRequested) return undefined
+        const values = completion.items
+        const sourceFiles = resource.sourceModule && values.some(value => value.kind === 'file' && isSourceFile(value.name))
+        const native = sourceFiles && document.languageId === 'vue' ? await query('completion', document, position, token) || { entries: [] } : { entries: [] }
+        const names = new Set(native.entries.map(value => value.name.replace(/\/$/, '')))
+        const paths = document.languageId !== 'vue' ? values.filter(value => !isSourceFile(value.name)) :
+          sourceFiles ? values.filter(value => !isSourceFile(value.name) && !names.has(value.name.replace(/\/$/, ''))) : values
+        const items = paths.map(value => {
+          const item = completeItem({ ...value, replacementSpan }, document)
+          if (value.kind === 'folder') {
+            item.detail = RESOURCE_DIRECTORY_DETAIL
+            if (completionEnd < resource.end) item.insertText = value.name.slice(0, -1)
+            item.command = { command: 'editor.action.triggerSuggest', title: 'Continue resource path' }
+          }
+          return item
+        })
+        // A nested public-provider query must not recursively probe itself.
+        if (document.languageId !== 'vue' && items.some(item => item.kind === vscode.CompletionItemKind.Folder) && !nativeDirectoryProbes.has(document)) {
+          nativeDirectoryProbes.add(document)
+          let folders
+          try { folders = await nativePathFolders(vscode, document, position, token, version, completionContext) }
+          finally { nativeDirectoryProbes.delete(document) }
+          if (folders === null) return undefined
+          for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].kind === vscode.CompletionItemKind.Folder && folders.has(String(items[i].label).replace(/\/$/, ''))) items.splice(i, 1)
+          }
+        }
+        if (document.version !== version || token?.isCancellationRequested) return undefined
+        if (completion.directory || values.length || !resource.sourceModule) {
+          return new vscode.CompletionList([...native.entries.map(value => completeItem({ ...value,
+            replacementSpan: value.replacementSpan || replacementSpan }, document)), ...items], Boolean(native.isIncomplete))
+        }
+      }
+      if (document.languageId !== 'vue') return undefined
       const slot = require('./slots').slotContext(index, document.offsetAt(position))
       if (slot) {
         const items = await query('slotCompletions', document, position, token) || []
@@ -353,14 +423,30 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       return ranges ? new vscode.LinkedEditingRanges(ranges.map(range)) : undefined
     }
   })
-  register('registerDocumentLinkProvider', selector, {
-    provideDocumentLinks(document) {
-      return embedded.entries(document, documentIndex(document)).flatMap(entry =>
-        (entry.language === 'html'
-          ? entry.service.findDocumentLinks(entry.document, documentContext)
-          : entry.service.findDocumentLinks(entry.document, entry.parsed, documentContext))
-          .filter(value => value.target).map(value =>
-            new vscode.DocumentLink(range(value.range), vscode.Uri.parse(value.target))))
+  register('registerDocumentLinkProvider', hoverSelector, {
+    provideDocumentLinks(document, token) {
+      if (token?.isCancellationRequested) return []
+      const index = documentIndex(document)
+      return resourceReferences(index, embedded.entries(document, index))
+        .filter(reference => reference.closed !== false && !reference.sourceModule && reference.reference && !reference.reference.endsWith('/')).map(reference => {
+        const value = reference.reference.trimStart()
+        const nativeURI = reference.target && !/^[@~]/.test(value) && /[?#%]/.test(value)
+        const direct = nativeURI || /^#|^\.\.?\//.test(value) || path.isAbsolute(value) ||
+          /^[a-z][\w+.-]*:/i.test(value)
+        const target = direct ? reference.target || documentContext.resolveReference(reference.reference, document.uri.toString()) : undefined
+        const link = new vscode.DocumentLink(new vscode.Range(document.positionAt(reference.start), document.positionAt(reference.end)),
+          target ? vscode.Uri.parse(target) : undefined)
+        // Alias IO is deferred until a link is selected, not performed on open.
+        if (!target) link.vueClickResource = { document, version: document.version, reference: reference.reference }
+        return link
+      })
+    },
+    async resolveDocumentLink(link, token) {
+      const value = link.vueClickResource
+      if (!value || value.document.version !== value.version || token?.isCancellationRequested) return link
+      const target = await resourceContext(value.document, token).resolve(value.reference, value.document.fileName)
+      if (target && value.document.version === value.version && !token?.isCancellationRequested) link.target = vscode.Uri.file(target)
+      return link
     }
   })
   register('registerDocumentHighlightProvider', selector, {
@@ -580,9 +666,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   context.subscriptions.push(client, embedded, diagnostics,
     vscode.workspace.onDidOpenTextDocument(schedule),
     vscode.workspace.onDidChangeTextDocument(event => {
-      if (/(?:^|\/)(?:tsconfig|jsconfig|package)\.json$/.test(event.document.fileName)) {
-        client.invalidate()
-      }
+      client.configDocumentChanged(event.document.fileName)
       schedule(event.document)
     }),
     vscode.workspace.onDidCloseTextDocument(document => {
@@ -619,7 +703,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   if (vscode.workspace.createFileSystemWatcher) {
     const watcher = vscode.workspace.createFileSystemWatcher('**/{*.vue,*.js,*.jsx,*.ts,*.tsx,*.json,.gitignore}')
     function changed(uri, kind) {
-      if (/(?:^|\/)(?:node_modules|\.git)\//.test(uri.fsPath)) {
+      if (/(?:^|\/)(?:node_modules|\.git)\//.test(uri.fsPath) && !client.isConfigDependency(uri.fsPath)) {
         return
       }
       client.fileChanged(uri.fsPath, kind)
@@ -639,6 +723,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         [...versions].some(([source, version]) => source.isClosed || source.version !== version)
       const styles = await require('./style-navigation').findStyleDefinitions(index, document.offsetAt(position), {
         isCancelled: cancelled,
+        resolveStyleFile: resourceContext(document, token).resolveStyleFile,
         async readFile(fileName) {
           if (cancelled()) {
             return null

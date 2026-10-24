@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const ts = require('typescript')
+const { within, ancestors, configCandidates } = require('./project-config')
 
 // Read configuration as data only. In particular, do not require project config
 // files: webpack/Vue configuration can execute arbitrary application code.
@@ -10,30 +11,13 @@ const extensions = ['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.vue']
 const declarations = /\.d\.(?:ts|mts|cts)$/i
 const supported = /\.(?:vue|js|ts|jsx|tsx|mjs|cjs)$/i
 
-function within(root, file) {
-  const relative = path.relative(root, file)
-  return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
-}
-
-function ancestors(directory, boundary) {
-  const result = []
-  for (let i = 0; i < 128; i++) {
-    result.push(directory)
-    if (directory === boundary) break
-    const parent = path.dirname(directory)
-    if (parent === directory) break
-    directory = parent
-  }
-  return result
-}
-
 function cleanSpecifier(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 4096 &&
     !/[\0\r\n!?#]/.test(value) && !/^[a-z][\w+.-]*:/i.test(value) && !value.includes('\\')
 }
 
 /** Resolve a static module import without evaluating any project code. */
-async function resolveModulePath(specifier, fromFile, options = {}) {
+async function resolveStaticPath(specifier, fromFile, options = {}) {
   try {
     if (!cleanSpecifier(specifier) || typeof fromFile !== 'string' || !path.isAbsolute(fromFile)) return null
     const read = options.readFile || (file => fs.readFile(file, 'utf8'))
@@ -54,7 +38,7 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
       const parsed = ts.parseConfigFileTextToJson(file, contents)
       return parsed.error || !parsed.config || typeof parsed.config !== 'object' || Array.isArray(parsed.config) ? null : parsed.config
     }
-    const probe = async candidate => {
+    const probe = options.probe || (async candidate => {
       candidate = path.resolve(candidate)
       if (declarations.test(candidate)) return null
       if (supported.test(candidate)) {
@@ -75,7 +59,7 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
         if (await isFile(file)) return file
       }
       return null
-    }
+    })
 
     const fromDirectory = path.dirname(fromFile)
     const root = typeof options.workspaceRoot === 'string' && path.isAbsolute(options.workspaceRoot) && within(options.workspaceRoot, fromFile)
@@ -107,10 +91,12 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
     // Abort the whole resolution when exhausted so partially merged paths or
     // default src aliases cannot produce a misleading definition location.
     let configBudget = 256
+    const substituteConfigDir = (value, directory) => value.toLowerCase().startsWith('${configdir}')
+      ? path.resolve(directory, value.replace('${configDir}', './')) : value
     const spendConfigBudget = () => {
       if (configBudget-- <= 0) throw new Error('Configuration traversal limit exceeded')
     }
-    const loadConfig = async (file, seen = new Set()) => {
+    const loadConfig = async (file, seen = new Set(), configDirectory = path.dirname(file)) => {
       spendConfigBudget()
       if (seen.has(file)) return {}
       if (seen.size >= 32) throw new Error('Configuration inheritance depth limit exceeded')
@@ -136,17 +122,18 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
           }
         }
         if (configFile) {
-          const parent = await loadConfig(configFile, branch)
+          const parent = await loadConfig(configFile, branch, configDirectory)
           inherited = { ...inherited, ...parent }
         }
       }
       const compiler = config.compilerOptions && typeof config.compilerOptions === 'object' ? config.compilerOptions : {}
       const result = { ...inherited }
-      if (typeof compiler.baseUrl === 'string') result.baseUrl = path.resolve(directory, compiler.baseUrl)
+      if (typeof compiler.baseUrl === 'string') result.baseUrl = path.resolve(directory, substituteConfigDir(compiler.baseUrl, configDirectory))
       if (compiler.paths && typeof compiler.paths === 'object' && !Array.isArray(compiler.paths)) {
         result.mappings = Object.entries(compiler.paths).map(([pattern, targets]) => ({
           pattern,
-          targets: Array.isArray(targets) ? targets.filter(target => typeof target === 'string') : [],
+          targets: Array.isArray(targets) ? targets.filter(target => typeof target === 'string')
+            .map(target => substituteConfigDir(target, configDirectory)) : [],
           directory
         }))
       }
@@ -158,17 +145,11 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
     }
 
     let config = { mappings: [] }
-    for (const directory of directories) {
-      let found = false
-      for (const name of ['tsconfig.json', 'jsconfig.json']) {
-        const configFile = path.join(directory, name)
-        if (await isFile(configFile) || await text(configFile) !== null) {
-          config = await loadConfig(configFile)
-          found = true
-          break
-        }
+    for (const configFile of configCandidates(fromFile, root)) {
+      if (await isFile(configFile) || await text(configFile) !== null) {
+        config = await loadConfig(configFile)
+        break
       }
-      if (found) break
     }
     const matches = []
     for (const mapping of config.mappings || []) {
@@ -211,6 +192,11 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
       return null
     }
 
+    if (options.relativeFallback && !/^[@~]/.test(specifier)) {
+      const hit = await probe(path.resolve(fromDirectory, specifier))
+      if (hit) return hit
+    }
+    if (options.allowPackages === false) return null
     const located = await locatePackage(specifier, fromDirectory)
     if (!located) return null
     const { packageRoot, manifest, subpath } = located
@@ -263,6 +249,10 @@ async function resolveModulePath(specifier, fromFile, options = {}) {
   }
 }
 
+function resolveModulePath(specifier, fromFile, options = {}) {
+  return resolveStaticPath(specifier, fromFile, options)
+}
+
 /** Share only IO results during one definition request, never across requests. */
 function createModuleResolver(options = {}) {
   const read = options.readFile || (file => fs.readFile(file, 'utf8'))
@@ -283,4 +273,4 @@ function createModuleResolver(options = {}) {
   return async (specifier, fromFile) => resolveModulePath(specifier, fromFile, session)
 }
 
-module.exports = { resolveModulePath, createModuleResolver }
+module.exports = { resolveModulePath, resolveStaticPath, createModuleResolver }

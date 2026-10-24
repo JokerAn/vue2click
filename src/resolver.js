@@ -84,7 +84,7 @@ function buildIndex(text, language, fileName = 'untitled.js') {
     ? buildTemplateIndex(text, expression => buildIndex(expression, kind === ts.ScriptKind.TS ? 'typescript' : 'javascript'))
     : { expressions: [], references: [] }
   return { root, text, source, bindings, options, imports, thisAssignments, templates: template.expressions,
-    templateReferences: template.references, blocks: template.blocks || [], tags: template.tags || [],
+    templateReferences: template.references, blocks: template.blocks || [], blockSources: template.blockSources || [], tags: template.tags || [],
     templateTexts: template.texts || [], fileName,
     scriptSetup: language === 'vue' && /<script\b[^>]*\bsetup(?:\s|=|>)/i.test(text) }
 }

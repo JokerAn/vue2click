@@ -10,6 +10,7 @@ const { buildIndex } = require('./resolver')
 const { createModuleResolver } = require('./module-paths')
 const { createIndirectService } = require('./indirect')
 const { createProjectFiles } = require('./project-files')
+const { findNearestConfig, fileStamp } = require('./project-config')
 
 const normalize = file => path.resolve(file).replace(/\\/g, '/')
 const parts = value => ts.displayPartsToString(value || [])
@@ -21,20 +22,38 @@ function createProjectService(root, firstFile, libDirectory) {
   const disk = new Map()
   let projectVersion = 0
   let globalRevision = 0
-  const config = ts.findConfigFile(path.dirname(firstFile), ts.sys.fileExists, 'tsconfig.json') ||
-    ts.findConfigFile(path.dirname(firstFile), ts.sys.fileExists, 'jsconfig.json')
+  const config = findNearestConfig(firstFile, root)
   const configRoot = config ? path.dirname(config) : root
   let rawConfig = {}
   let configErrors = []
+  const configuration = new Map()
+  function trackConfig(file) {
+    file = normalize(file)
+    if (!configuration.has(file)) {
+      if (configuration.size >= 512) throw new Error('Configuration dependency limit exceeded')
+      configuration.set(file, fileStamp(file))
+    }
+  }
+  const configHost = {
+    ...ts.sys,
+    fileExists(file) {
+      if (file.endsWith('.json')) trackConfig(file)
+      return ts.sys.fileExists(file)
+    },
+    readFile(file) {
+      trackConfig(file)
+      return ts.sys.readFile(file)
+    }
+  }
   if (config) {
-    const result = ts.readConfigFile(config, ts.sys.readFile)
+    const result = ts.readConfigFile(config, configHost.readFile)
     rawConfig = result.config || {}
     if (result.error) {
       configErrors.push(result.error)
     }
   }
   const projectFilesHost = createProjectFiles(configRoot)
-  const parsed = ts.parseJsonConfigFileContent(rawConfig, { ...ts.sys, readDirectory: projectFilesHost.readDirectory }, configRoot, undefined, config, undefined,
+  const parsed = ts.parseJsonConfigFileContent(rawConfig, { ...configHost, readDirectory: projectFilesHost.readDirectory }, configRoot, undefined, config, undefined,
     [{ extension: '.vue', isMixedContent: true, scriptKind: ts.ScriptKind.Deferred }])
   configErrors.push(...parsed.errors)
   const options = {
@@ -207,7 +226,7 @@ function createProjectService(root, firstFile, libDirectory) {
     }
   }
   const indexes = new Map()
-  const moduleResolver = createModuleResolver({ workspaceRoot: configRoot })
+  let moduleResolver = createModuleResolver({ workspaceRoot: configRoot })
   async function loadIndex(file, registryOnly = false) {
     file = normalize(file)
     const entry = read(file)
@@ -231,7 +250,7 @@ function createProjectService(root, firstFile, libDirectory) {
   }
   const indirect = createIndirectService(
     () => [...new Set([...projectFiles, ...buffers.keys()])].filter(file => !file.endsWith('.vue') && !file.endsWith('.d.ts')),
-    loadIndex, moduleResolver, () => globalRevision)
+    loadIndex, (specifier, from) => moduleResolver(specifier, from), () => globalRevision)
   const libraryData = require('./library-data').createLibraryData(configRoot)
   let metadataVersion
   const metadataCache = new Map()
@@ -270,6 +289,7 @@ function createProjectService(root, firstFile, libDirectory) {
   }
 
   function sync(documents) {
+    const previousVersion = projectVersion
     const active = new Set()
     for (const document of documents) {
       const file = normalize(document.fileName)
@@ -305,6 +325,7 @@ function createProjectService(root, firstFile, libDirectory) {
     }
     // Filesystem notifications and buffer revisions invalidate the project.
     // Repeated queries against unchanged text reuse TypeScript's program.
+    if (previousVersion !== projectVersion) moduleResolver = createModuleResolver({ workspaceRoot: configRoot })
   }
   function documentation(info) {
     return {
@@ -324,6 +345,7 @@ function createProjectService(root, firstFile, libDirectory) {
       file = normalize(file)
       projectVersion++
       globalRevision++
+      moduleResolver = createModuleResolver({ workspaceRoot: configRoot })
       if (libraryData.affected(file)) {
         libraryData.invalidate()
       }
@@ -501,6 +523,7 @@ function createProjectService(root, firstFile, libDirectory) {
       throw new Error(`Unknown language request: ${method}`)
     },
     files: () => [...roots].filter(file => file !== typesFile),
+    configuration: () => [...configuration].map(([fileName, stamp]) => ({ fileName, stamp })),
     dispose: () => { service.dispose(); disk.clear(); buffers.clear(); indexes.clear(); metadataCache.clear() }
   }
 }
