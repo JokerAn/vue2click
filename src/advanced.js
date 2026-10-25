@@ -2,7 +2,7 @@
 
 const { createLanguageClient } = require('./language-client')
 const { createEmbeddedService } = require('./embedded')
-const { declarationInfo, documentSymbols, nodeAt } = require('./insight')
+const { declarationInfo, documentSymbols, staticHoverInfo } = require('./insight')
 const { scriptFolding, scriptSelection, scriptFormatting, scriptHighlights } = require('./script-editing')
 const path = require('node:path')
 const { createResourceResolver, resourceReferences, localReference, urlContext, isSourceFile } = require('./resource-paths')
@@ -30,6 +30,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   const embedded = createEmbeddedService()
   const nativeDirectoryProbes = new WeakSet()
   require('./tag-closing').registerTagClosing(vscode, context, documentIndex, embedded)
+  require('./style-resources').registerStyleResources(vscode, context)
   const selector = [{ language: 'vue', scheme: 'file' }]
   const hoverSelector = ['vue', 'javascript', 'javascriptreact', 'typescript', 'typescriptreact']
     .map(language => ({ language, scheme: 'file' }))
@@ -114,9 +115,22 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   })
   register('registerHoverProvider', hoverSelector, {
     async provideHover(document, position, token) {
+      const version = document.version
+      const current = () => document.version === version && !document.isClosed && !token?.isCancellationRequested
+      if (!current()) return undefined
       const index = documentIndex(document)
+      function staticResult(info) {
+        const contents = new vscode.MarkdownString()
+        contents.isTrusted = false
+        if (info.text) contents.appendCodeblock(info.type ? `${info.text}: ${info.type}` : info.text, 'typescript')
+        contents.appendMarkdown('\n\n' + info.documentation)
+        return new vscode.Hover(contents, document.getWordRangeAtPosition(position))
+      }
+      let fallback = staticHoverInfo(index, document.offsetAt(position))
+      if (fallback?.documentation) return staticResult(fallback)
       const reference = index.templateReferences.find(value => document.offsetAt(position) >= value.start && document.offsetAt(position) < value.end)
       const component = reference ? await query('componentHover', document, position, token) : null
+      if (!current()) return undefined
       if (component) {
         const contents = new vscode.MarkdownString()
         contents.appendCodeblock(component.text, 'typescript')
@@ -134,21 +148,27 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
             info.range ? range(info.range) : undefined)
         }
       }
-      const info = await query('quickInfo', document, position, token)
       const hit = await resolveStatic(document, position, token)
-      let fallback = hit?.index && declarationInfo(hit.index, hit.start)
-      const cursor = nodeAt(index, document.offsetAt(position))
-      if (!fallback && cursor?.parent?.name === cursor) {
-        fallback = declarationInfo(index, document.offsetAt(position))
-      }
+      if (!current() || hit?.stale) return undefined
+      fallback = staticHoverInfo(index, document.offsetAt(position), hit)
+      if (fallback?.documentation) return staticResult(fallback)
+      const info = await query('quickInfo', document, position, token)
+      if (!current()) return undefined
       if (!fallback?.documentation && !docs(info)) {
         const definitions = await query('indirectDefinitions', document, position, token)
-        if (definitions?.[0]) {
-          const target = await vscode.workspace.openTextDocument(vscode.Uri.file(definitions[0].fileName))
-          fallback = declarationInfo(documentIndex(target), definitions[0].textSpan.start)
+        if (!current()) return undefined
+        if (definitions?.length === 1) {
+          const definition = definitions[0]
+          const target = await vscode.workspace.openTextDocument(vscode.Uri.file(definition.fileName))
+          fallback = declarationInfo(documentIndex(target), definition.textSpan.start)
+          if (definition.sourceKind === 'Vue.prototype') {
+            fallback = { ...fallback,
+              text: fallback?.text || target.getText(span(target, definition.textSpan)),
+              source: `Vue.prototype (${path.relative(path.dirname(document.fileName), target.fileName).replace(/\\/g, '/')})` }
+          }
         }
       }
-      if (hit?.stale || token?.isCancellationRequested) {
+      if (!current()) {
         return undefined
       }
       const description = docs(info) || fallback?.documentation
@@ -157,10 +177,11 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       }
       const contents = new vscode.MarkdownString()
       contents.isTrusted = false
-      const signature = info?.text || fallback?.text
+      const signature = info?.text || (fallback?.type ? `${fallback.text}: ${fallback.type}` : fallback?.text)
       if (signature) {
         contents.appendCodeblock(signature, 'typescript')
       }
+      if (fallback?.source) contents.appendCodeblock(fallback.source, 'text')
       if (description) {
         contents.appendMarkdown('\n\n' + description)
       }

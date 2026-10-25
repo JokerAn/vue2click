@@ -4,6 +4,39 @@ const esbuild = require('esbuild')
 const fs = require('node:fs')
 const path = require('node:path')
 
+function findPackageManifest(file) {
+  let directory
+  try {
+    directory = path.dirname(fs.realpathSync(file))
+  } catch {
+    directory = path.dirname(path.resolve(file))
+  }
+  while (directory !== path.dirname(directory)) {
+    const manifestPath = path.join(directory, 'package.json')
+    if (fs.existsSync(manifestPath)) {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+      if (manifest.name && manifest.version) {
+        return { directory, manifest }
+      }
+    }
+    directory = path.dirname(directory)
+  }
+  return null
+}
+
+function bundledPackages(inputs, projectRoot) {
+  const packages = new Map()
+  const root = fs.realpathSync(projectRoot)
+  for (const file of inputs) {
+    const owner = findPackageManifest(file)
+    if (!owner) throw new Error(`Cannot identify bundled input: ${file}`)
+    if (owner.directory !== root) {
+      packages.set(`${owner.manifest.name}@${owner.manifest.version}`, owner)
+    }
+  }
+  return packages
+}
+
 async function main() {
   const common = {
     bundle: true, platform: 'node', format: 'cjs', target: 'node18', minify: true,
@@ -13,26 +46,8 @@ async function main() {
     esbuild.build({ ...common, entryPoints: ['src/extension.js'], outfile: 'dist/extension.js' }),
     esbuild.build({ ...common, entryPoints: ['src/language-worker.js'], outfile: 'dist/language-worker.cjs' })
   ])
-  const dependencies = new Map()
-  for (const bundle of bundles) {
-    for (const file of Object.keys(bundle.metafile.inputs)) {
-      if (!file.startsWith('node_modules/')) {
-        continue
-      }
-      let directory = path.dirname(file)
-      while (directory !== '.' && directory !== 'node_modules') {
-        const manifestPath = path.join(directory, 'package.json')
-        if (fs.existsSync(manifestPath)) {
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-          if (manifest.name && manifest.version) {
-            dependencies.set(`${manifest.name}@${manifest.version}`, { directory, manifest })
-            break
-          }
-        }
-        directory = path.dirname(directory)
-      }
-    }
-  }
+  const dependencies = bundledPackages(bundles.flatMap(bundle => Object.keys(bundle.metafile.inputs)), process.cwd())
+  if (!dependencies.size) throw new Error('Bundled dependency notices must not be empty')
   const notices = ['Bundled dependency license notices. Generated from the exact build inputs.\n']
   for (const [name, { directory, manifest }] of [...dependencies].sort()) {
     notices.push(`\n=== ${name} (${manifest.license || 'see notice'}) ===\n`)
@@ -56,4 +71,8 @@ async function main() {
   }
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1 })
+if (require.main === module) {
+  main().catch(error => { console.error(error); process.exitCode = 1 })
+}
+
+module.exports = { findPackageManifest, bundledPackages, main }

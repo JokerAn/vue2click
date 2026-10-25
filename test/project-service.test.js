@@ -241,6 +241,85 @@ test('static fallback tracks mixins, globals, refs, component events and Vuex ma
   }
 })
 
+test('static fallback resolves string refs and install-scoped Vue globals', async t => {
+  const text = `<template><global-child ref="dialog" /></template><script>
+    export default { methods: {
+      run() { this.$refs["dialog"].open(); this.$notify(); this.$eventBus.$emit('x') }
+    } }
+  </script>`
+  const { root, file, service } = fixture(t, {
+    'Parent.vue': text,
+    'Child.vue': `<script>export default { methods: { open() {} } }</script>`,
+    'plugin.js': `import Vue from 'vue'; import Child from './Child.vue'
+      const MyPlugin = {}
+      MyPlugin.install = function (Vue) {
+        Vue.component('global-child', Child)
+        Vue.prototype.$notify = function () {}
+        Vue.prototype.$eventBus = new Vue()
+      }
+      export default MyPlugin`
+  })
+  for (const [marker, target, name] of [
+    ['dialog"].open', 'Child.vue', 'open'],
+    ['this.$notify', 'plugin.js', '$notify'],
+    ['this.$eventBus', 'plugin.js', '$eventBus']
+  ]) {
+    const offset = text.indexOf(marker) + (marker.startsWith('dialog') ? marker.indexOf('open') + 1 : marker.indexOf('$'))
+    const result = await service.run('indirectDefinitions', file, offset)
+    assert.ok(result.length, marker)
+    assert.equal(result[0].fileName, path.join(root, target), marker)
+    const source = fs.readFileSync(result[0].fileName, 'utf8')
+    assert.equal(source.slice(result[0].textSpan.start, result[0].textSpan.start + result[0].textSpan.length), name, marker)
+  }
+})
+
+test('ordinary functions named install do not create Vue globals', async t => {
+  const text = `<script>export default { methods: { run() { this.$fake() } } }</script>`
+  const { file, service } = fixture(t, {
+    'Parent.vue': text,
+    'unrelated.js': `function install(Vue) { Vue.prototype.$fake = function () {} }`
+  })
+  assert.deepEqual(await service.run('indirectDefinitions', file, text.indexOf('$fake') + 1), [])
+})
+
+test('global registrations refresh through unsaved edits, buffer close and filesystem lifecycle', async t => {
+  const text = '<script>export default { methods: { run() { this.$old; this.$new; this.$added } } }</script>'
+  const plugin = `import Vue from 'vue'; Vue.prototype.$old = 1`
+  const scanner = require('../src/global-registry')
+  const original = scanner.createGlobalRegistry
+  const scans = []
+  t.mock.method(scanner, 'createGlobalRegistry', (files, load) =>
+    original(files, (file, ...args) => { scans.push(file); return load(file, ...args) }))
+  const { file, root, service } = fixture(t, { 'Parent.vue': text, 'plugin.js': plugin })
+  const pluginFile = path.join(root, 'plugin.js')
+  const query = name => service.run('indirectDefinitions', file, text.indexOf(name) + 1)
+  assert.equal((await query('$old'))[0]?.fileName, pluginFile)
+  const initialScans = scans.length
+
+  service.sync([{ fileName: file, version: 1 }, {
+    fileName: pluginFile, version: 1, text: plugin.replace('$old', '$new')
+  }])
+  assert.deepEqual(await query('$old'), [])
+  assert.equal((await query('$new'))[0]?.fileName, pluginFile)
+  assert.deepEqual(scans.slice(initialScans), [pluginFile])
+
+  service.sync([{ fileName: file, version: 1 }])
+  assert.equal((await query('$old'))[0]?.fileName, pluginFile, 'closing unsaved buffer restores disk')
+  assert.deepEqual(await query('$new'), [])
+  fs.writeFileSync(pluginFile, plugin.replace('$old', '$new'))
+  service.invalidate(pluginFile, 'change')
+  assert.equal((await query('$new'))[0]?.fileName, pluginFile)
+  assert.deepEqual(await query('$old'), [])
+
+  fs.unlinkSync(pluginFile)
+  service.invalidate(pluginFile, 'delete')
+  assert.deepEqual(await query('$new'), [])
+  const added = path.join(root, 'added.js')
+  fs.writeFileSync(added, `import Vue from 'vue'; Vue.prototype.$added = 1`)
+  service.invalidate(added, 'create')
+  assert.equal((await query('$added'))[0]?.fileName, added)
+})
+
 test('project discovery respects nested gitignore rules and does not include ignored sources', t => {
   const { root, service } = fixture(t, { 'Parent.vue': '<script>export default {}</script>' })
   // Recreate only the service so discovery sees the actual ignore files.

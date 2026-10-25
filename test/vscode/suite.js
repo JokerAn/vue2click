@@ -9,6 +9,13 @@ const vscode = require('vscode')
 const { grammarRegistry, tokens } = require('../helpers/grammar')
 
 async function run() {
+  if (process.env.VUECLICK_READ_TEST_ONLY === '1') {
+    const extension = vscode.extensions.getExtension('jokeran.vueClick')
+    assert.ok(extension, 'development extension must be registered')
+    await extension.activate()
+    await require('./read-only').runReadOnly(process.env.VUECLICK_TEST_WORKSPACE)
+    return
+  }
   // Editor commands need real window focus; do not fake editor context keys.
   if ((await vscode.commands.getCommands(true)).includes('workbench.action.focusWindow')) {
     await vscode.commands.executeCommand('workbench.action.focusWindow')

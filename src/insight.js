@@ -15,9 +15,51 @@ function nodeAt(index, offset) {
   return found
 }
 
+function cleanDoc(doc) {
+  return doc.getText().replace(/^\/\*\*|\*\/$/g, '').split(/\r?\n/)
+    .map(line => line.replace(/^\s*\* ?/, '')).join('\n').trim()
+}
+
+function docDetails(docs) {
+  const returns = docs.flatMap(doc => [...(doc.tags || [])]).find(ts.isJSDocReturnTag)
+  return {
+    documentation: docs.map(cleanDoc).join('\n\n'),
+    returnType: returns?.typeExpression?.type.getText()
+  }
+}
+
+function containingParameter(node) {
+  for (let current = node; current && !ts.isSourceFile(current); current = current.parent) {
+    if (ts.isParameter(current)) return current
+    if (ts.isFunctionLike(current)) return null
+  }
+  return null
+}
+
 function declarationInfo(index, offset) {
   let node = nodeAt(index, offset)
+  const origin = node
+  const parameter = node && containingParameter(node)
+  if (parameter) {
+    const name = parameter.name?.getText(index.root) || ''
+    const entry = ts.getJSDocParameterTags(parameter).find(tag => tag.name.getText(index.root) === name)
+    if (entry) {
+      return {
+        text: name,
+        documentation: (typeof entry.comment === 'string' ? entry.comment :
+          entry.comment?.map(part => part.text || part.name?.getText(index.root) || '').join('') || '').trim(),
+        type: parameter.type?.getText(index.root) || entry.typeExpression?.type.getText(index.root),
+        parameter: name,
+        span: { start: parameter.name?.getStart(index.root) ?? parameter.getStart(index.root),
+          length: (parameter.name?.end ?? parameter.end) -
+            (parameter.name?.getStart(index.root) ?? parameter.getStart(index.root)) }
+      }
+    }
+  }
   while (node && !ts.isSourceFile(node)) {
+    if (ts.isFunctionLike(node) && node !== origin && node.name !== origin) {
+      break
+    }
     const docs = [...(node.jsDoc || [])]
     const callable = ts.isFunctionLike(node) ? node :
       node.initializer && ts.isFunctionLike(node.initializer) ? node.initializer : undefined
@@ -26,11 +68,11 @@ function declarationInfo(index, offset) {
     }
     if (docs.length || callable) {
       const name = node.name?.getText(index.root) || callable?.name?.getText(index.root) || ''
+      const details = docDetails(docs)
       return {
         text: callable ? `${name}(${callable.parameters.map(parameter => parameter.getText(index.root)).join(', ')})` : name,
-        documentation: docs.map(doc => doc.getText(index.root)
-          .replace(/^\/\*\*|\*\/$/g, '').split(/\r?\n/)
-          .map(line => line.replace(/^\s*\* ?/, '')).join('\n').trim()).join('\n\n'),
+        documentation: details.documentation,
+        returnType: details.returnType,
         span: { start: node.name?.getStart(index.root) ?? node.getStart(index.root),
           length: (node.name?.end ?? node.end) - (node.name?.getStart(index.root) ?? node.getStart(index.root)) }
       }
@@ -38,6 +80,15 @@ function declarationInfo(index, offset) {
     node = node.parent
   }
   return null
+}
+
+function staticHoverInfo(index, offset, hit) {
+  let fallback = hit?.index && declarationInfo(hit.index, hit.start)
+  const cursor = nodeAt(index, offset)
+  if (!fallback && cursor?.parent?.name === cursor) {
+    fallback = declarationInfo(index, offset)
+  }
+  return fallback
 }
 
 function documentSymbols(index) {
@@ -81,4 +132,4 @@ function documentSymbols(index) {
   return result
 }
 
-module.exports = { nodeAt, declarationInfo, documentSymbols }
+module.exports = { nodeAt, declarationInfo, staticHoverInfo, documentSymbols }

@@ -65,6 +65,20 @@ function createResourceResolver(options = {}) {
     resolve: (specifier, fromFile) => resolveWith(specifier, fromFile, async candidate =>
       await session.isFile(candidate) ? candidate : null),
     resolveStyleFile: (specifier, fromFile, probe) => resolveWith(specifier, fromFile, probe),
+    resolveStylesheet: (specifier, fromFile, language) => resolveWith(specifier, fromFile, async candidate => {
+      const extension = path.extname(candidate)
+      if (extension) {
+        return /\.(css|scss|less)$/i.test(extension) && await session.isFile(candidate) ? candidate : null
+      }
+      if (await session.isFile(candidate)) return candidate
+      const extensions = language === 'scss' ? ['.scss', '.css'] : language === 'less' ? ['.less', '.css'] : ['.css']
+      const matches = []
+      for (const suffix of extensions) {
+        if (cancelled()) return null
+        if (await session.isFile(candidate + suffix)) matches.push(candidate + suffix)
+      }
+      return matches.length === 1 ? matches[0] : null
+    }),
     completePaths,
     complete: async (specifier, fromFile) => (await completePaths(specifier, fromFile)).items
   }

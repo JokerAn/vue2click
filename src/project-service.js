@@ -21,7 +21,6 @@ function createProjectService(root, firstFile, libDirectory) {
   const buffers = new Map()
   const disk = new Map()
   let projectVersion = 0
-  let globalRevision = 0
   const config = findNearestConfig(firstFile, root)
   const configRoot = config ? path.dirname(config) : root
   let rawConfig = {}
@@ -250,7 +249,7 @@ function createProjectService(root, firstFile, libDirectory) {
   }
   const indirect = createIndirectService(
     () => [...new Set([...projectFiles, ...buffers.keys()])].filter(file => !file.endsWith('.vue') && !file.endsWith('.d.ts')),
-    loadIndex, (specifier, from) => moduleResolver(specifier, from), () => globalRevision)
+    loadIndex, (specifier, from) => moduleResolver(specifier, from))
   const libraryData = require('./library-data').createLibraryData(configRoot)
   let metadataVersion
   const metadataCache = new Map()
@@ -302,7 +301,7 @@ function createProjectService(root, firstFile, libDirectory) {
         buffers.set(file, { sourceVersion: String(document.version), version: String(++projectVersion),
           snapshot: ts.ScriptSnapshot.fromString(document.text) })
         if (!file.endsWith('.vue')) {
-          globalRevision++
+          indirect.invalidate(file)
         }
       }
       if (file.startsWith(root + '/')) {
@@ -319,7 +318,7 @@ function createProjectService(root, firstFile, libDirectory) {
         buffers.delete(file)
         projectVersion++
         if (!file.endsWith('.vue')) {
-          globalRevision++
+          indirect.invalidate(file)
         }
       }
     }
@@ -344,7 +343,7 @@ function createProjectService(root, firstFile, libDirectory) {
     invalidate(file, kind) {
       file = normalize(file)
       projectVersion++
-      globalRevision++
+      if (!file.endsWith('.vue')) indirect.invalidate(file)
       moduleResolver = createModuleResolver({ workspaceRoot: configRoot })
       if (libraryData.affected(file)) {
         libraryData.invalidate()
@@ -524,7 +523,7 @@ function createProjectService(root, firstFile, libDirectory) {
     },
     files: () => [...roots].filter(file => file !== typesFile),
     configuration: () => [...configuration].map(([fileName, stamp]) => ({ fileName, stamp })),
-    dispose: () => { service.dispose(); disk.clear(); buffers.clear(); indexes.clear(); metadataCache.clear() }
+    dispose: () => { service.dispose(); indirect.dispose(); disk.clear(); buffers.clear(); indexes.clear(); metadataCache.clear() }
   }
 }
 

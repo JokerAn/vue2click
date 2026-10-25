@@ -94,6 +94,20 @@ test('registered component tags resolve opening, closing and kebab-case spelling
   }
 })
 
+test('component tags target a named source anchor instead of the whole options object', async () => {
+  const child = `<script>
+export default {
+  name: 'AddressTab',
+  props: { title: String }
+}
+</script>`
+  const f = fixture(`<template><AddressTab /></template>
+<script>import AddressTab from './AddressTab.vue'; export default { components: { AddressTab } }</script>`, child)
+  const hit = await lookup(f, '<AddressTab', 'AddressTab')
+  assertTarget(f, hit)
+  assert.equal(f.files[childFile].slice(hit.start, hit.end), 'name')
+})
+
 test('prop arguments resolve camel/kebab names, v-bind modifiers and static props', async () => {
   for (const child of [objectProps, `<script>export default { props: ['addressParams', 'bookTimeData', 'result', 'title'] }</script>`]) {
     const f = fixture(`<template>

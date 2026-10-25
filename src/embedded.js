@@ -29,49 +29,58 @@ const styles = {
   less: css.getLESSLanguageService({ fileSystemProvider })
 }
 
-function createEmbeddedService() {
+function createEmbeddedService(options = {}) {
+  const htmlService = options.html || html
+  const styleServices = options.styles || styles
   const cache = new Map()
-  function entries(document, index) {
-    const key = document.uri.toString()
-    let entry = cache.get(key)
-    if (!entry || entry.version !== document.version) {
-      const text = index.text
-      const documents = []
-      for (const block of index.blocks) {
-        const language = block.tag === 'template' && (!block.lang || block.lang === 'html') ? 'html' :
-          block.tag === 'style' ? block.lang || 'css' : undefined
-        const service = language === 'html' ? html : styles[language]
-        if (!service || block.external) {
-          continue
-        }
-        const chars = text.split('')
-        for (let at = 0; at < chars.length; at++) {
-          if ((at < block.start || at >= block.end) && chars[at] !== '\r' && chars[at] !== '\n') {
+  function buildEntry(document, index, block, key) {
+    const text = index.text
+    const language = block.tag === 'template' && (!block.lang || block.lang === 'html') ? 'html' :
+      block.tag === 'style' ? block.lang || 'css' : undefined
+    const service = language === 'html' ? htmlService : styleServices[language]
+    if (!service || block.external) {
+      return null
+    }
+    const chars = text.split('')
+    for (let at = 0; at < chars.length; at++) {
+      if ((at < block.start || at >= block.end) && chars[at] !== '\r' && chars[at] !== '\n') {
+        chars[at] = ' '
+      }
+    }
+    if (language === 'html') {
+      // Keep markup and directive names; JS expressions are handled by the Vue service.
+      for (const expression of index.templates) {
+        for (let at = expression.start; at < expression.end; at++) {
+          if (chars[at] !== '\r' && chars[at] !== '\n') {
             chars[at] = ' '
           }
         }
-        if (language === 'html') {
-          // Keep markup and directive names; JS expressions are handled by the Vue service.
-          for (const expression of index.templates) {
-            for (let at = expression.start; at < expression.end; at++) {
-              if (chars[at] !== '\r' && chars[at] !== '\n') {
-                chars[at] = ' '
-              }
-            }
-          }
-        }
-        const virtual = TextDocument.create(key, language, document.version, chars.join(''))
-        documents.push({ language, service, document: virtual, block,
-          parsed: language === 'html' ? service.parseHTMLDocument(virtual) : service.parseStylesheet(virtual) })
       }
-      entry = { version: document.version, documents }
+    }
+    const virtual = TextDocument.create(key, language, document.version, chars.join(''))
+    return { language, service, document: virtual, block,
+      parsed: language === 'html' ? service.parseHTMLDocument(virtual) : service.parseStylesheet(virtual) }
+  }
+  function entries(document, index, onlyBlock) {
+    const key = document.uri.toString()
+    let entry = cache.get(key)
+    if (!entry || entry.version !== document.version) {
+      entry = { version: document.version, documents: new Map() }
       cache.delete(key)
       cache.set(key, entry)
       while (cache.size > 16) {
         cache.delete(cache.keys().next().value)
       }
     }
-    return entry.documents
+    const blocks = onlyBlock ? [onlyBlock] : index.blocks
+    for (const block of blocks) {
+      const blockKey = JSON.stringify([block.tag, block.lang, block.start, block.end, Boolean(block.external)])
+      if (!entry.documents.has(blockKey)) {
+        const value = buildEntry(document, index, block, key)
+        if (value) entry.documents.set(blockKey, value)
+      }
+    }
+    return [...entry.documents.values()]
   }
   return {
     at(document, index, position) {
@@ -79,9 +88,12 @@ function createEmbeddedService() {
       if (index.templates.some(expression => expression.start <= offset && offset <= expression.end)) {
         return undefined
       }
-      return entries(document, index).find(entry => offset >= entry.block.start && offset <= entry.block.end)
+      const block = index.blocks.find(value => offset >= value.start && offset <= value.end)
+      return block && entries(document, index, block).find(entry => offset >= entry.block.start && offset <= entry.block.end)
     },
-    entries,
+    entries(document, index) {
+      return entries(document, index)
+    },
     close: document => cache.delete(document.uri.toString()),
     dispose: () => cache.clear()
   }

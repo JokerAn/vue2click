@@ -139,7 +139,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     })
   }
 
-  function walk(node, inherited, literal = false) {
+  function walk(node, inherited, literal = false, inLoop = false) {
     if (node.type === NodeTypes.INTERPOLATION) {
       const start = node.loc.start.offset + 2
       const end = node.loc.end.offset - 2
@@ -161,6 +161,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
       return
     }
     if (node.type !== NodeTypes.ELEMENT) return
+    inLoop ||= node.props.some(prop => prop.type === NodeTypes.DIRECTIVE && prop.name === 'for')
     // The compiler removes v-pre from props, so check the raw opening attributes.
     const opening = node.loc.source.match(/^<[\w:.-]+((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*\s*)\/?\s*>/)
     literal ||= Boolean(opening && [...opening[1].matchAll(/\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?/g)]
@@ -174,6 +175,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     if (node !== template) {
       tags.push({
         tag: node.tag,
+        inLoop,
         // A bare `:` is an unfinished prop name, not an object v-bind.
         dynamic: dynamicProps.some(prop => prop.rawName !== ':' || prop.exp),
         start: node.loc.start.offset,
@@ -252,7 +254,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
       const event = prop.name === 'on' && Boolean(prop.arg)
       add(prop.exp, event ? new Map([...locals, ['$event', null]]) : locals, event)
     }
-    for (const child of node.children) walk(child, locals, literal)
+    for (const child of node.children) walk(child, locals, literal, inLoop)
   }
   walk(template, new Map())
   return result

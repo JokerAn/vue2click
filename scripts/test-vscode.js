@@ -17,6 +17,7 @@ async function main() {
       extensionTestsPath: path.join(root, 'test/vscode/suite.js'),
       extensionTestsEnv: {
         VUECLICK_TEST_WORKSPACE: directory,
+        VUECLICK_READ_TEST_ONLY: process.env.VUECLICK_READ_TEST_ONLY || '',
         VUECLICK_PATH_TEST_ONLY: process.env.VUECLICK_PATH_TEST_ONLY || '',
         VUECLICK_OPERATION_TEST_ONLY: process.env.VUECLICK_OPERATION_TEST_ONLY || '',
         VUECLICK_TEST_FILE: process.env.VUECLICK_TEST_FILE || ''

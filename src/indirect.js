@@ -1,6 +1,7 @@
 'use strict'
 
 const ts = require('typescript')
+const path = require('node:path')
 const { nodeAt } = require('./insight')
 const { vueMember, componentMembers, thisOwner, isInstanceReceiver } = require('./resolver')
 const { componentOptions, componentRegistration, resolveComponent, property, initializer, localObject, propDeclaration, key } = require('./components')
@@ -8,56 +9,31 @@ const camel = name => name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCas
 const same = (left, right) => camel(left).toLowerCase() === camel(right).toLowerCase()
 const hit = (index, node) => node ? { fileName: index.fileName, textSpan: { start: node.getStart(index.root), length: node.end - node.getStart(index.root) } } : null
 
-function createIndirectService(files, load, resolveModule, revision = () => 0) {
-  let registryVersion
-  let cachedRegistry
-  async function registry() {
-    const currentVersion = revision()
-    if (cachedRegistry && registryVersion === currentVersion) {
-      return cachedRegistry
-    }
-    const components = []
-    const members = []
-    const stores = []
-    for (const file of files()) {
-      const index = await load(file, true)
-      if (!index) {
-        continue
-      }
-      const vueNames = index.imports.filter(binding => binding.specifier === 'vue').map(binding => binding.local.text)
-      const vuexNames = index.imports.filter(binding => binding.specifier === 'vuex').map(binding => binding.local.text)
-      function visit(node) {
-        if (ts.isFunctionLike(node)) {
-          return
-        }
-        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-          node.expression.name.text === 'component' && ts.isIdentifier(node.expression.expression) &&
-          vueNames.includes(node.expression.expression.text) && node.arguments.length >= 2 && ts.isStringLiteral(node.arguments[0])) {
-          components.push({ name: node.arguments[0].text, index, expression: node.arguments[1] })
-        }
-        if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          ts.isPropertyAccessExpression(node.left) && ts.isPropertyAccessExpression(node.left.expression) &&
-          node.left.expression.name.text === 'prototype' && ts.isIdentifier(node.left.expression.expression) &&
-          vueNames.includes(node.left.expression.expression.text)) {
-          members.push({ name: node.left.name.text, index, node: node.left.name })
-        }
-        if (ts.isNewExpression(node) && node.arguments?.[0]) {
-          const ctor = node.expression
-          if ((ts.isPropertyAccessExpression(ctor) && ctor.name.text === 'Store' &&
-            ts.isIdentifier(ctor.expression) && vuexNames.includes(ctor.expression.text)) ||
-            (ts.isIdentifier(ctor) && index.imports.some(binding => binding.specifier === 'vuex' &&
-              binding.symbol === 'Store' && binding.local.text === ctor.text))) {
-            stores.push({ index, expression: node.arguments[0] })
-          }
-        }
-        ts.forEachChild(node, visit)
-      }
-      visit(index.root)
-    }
-    registryVersion = currentVersion
-    cachedRegistry = { components, members, stores }
-    return cachedRegistry
+function refAccessName(expression) {
+  if (ts.isPropertyAccessExpression(expression) &&
+    ts.isPropertyAccessExpression(expression.expression) &&
+    expression.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    expression.expression.name.text === '$refs') {
+    return expression.name.text
   }
+  if (ts.isElementAccessExpression(expression) &&
+    ts.isPropertyAccessExpression(expression.expression) &&
+    expression.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    expression.expression.name.text === '$refs' &&
+    expression.argumentExpression && ts.isStringLiteral(expression.argumentExpression)) {
+    return expression.argumentExpression.text
+  }
+  return null
+}
+
+function refTags(index, name) {
+  return index.tags.filter(tag => !tag.dynamic &&
+    tag.attributes.some(attribute => attribute.name === 'ref' && attribute.value === name))
+}
+
+function createIndirectService(files, load, resolveModule) {
+  const globals = require('./global-registry').createGlobalRegistry(files, load)
+  const registry = () => globals.get()
   const context = () => ({ loadIndex: load, resolveModule, remaining: 2048 })
   async function component(index, tag, globals) {
     let expression = componentRegistration(index, tag)
@@ -143,6 +119,8 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
     return null
   }
   return {
+    invalidate: file => globals.invalidate(file),
+    dispose: () => globals.dispose(),
     async componentInfo(index, tag) {
       const globals = await registry()
       const child = await component(index, tag, globals)
@@ -214,20 +192,17 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
       if (node && ts.isIdentifier(node) && ts.isPropertyAccessExpression(node.parent)) {
         const access = node.parent
         const receiver = access.expression
-        if (ts.isPropertyAccessExpression(receiver) && ts.isPropertyAccessExpression(receiver.expression) &&
-          receiver.expression.name.text === '$refs' && receiver.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
-          index.options.includes(thisOwner(index, node))) {
-          const tags = index.tags.filter(tag => !tag.dynamic &&
-            tag.attributes.some(attribute => attribute.name === 'ref' && attribute.value === receiver.name.text))
+        const name = refAccessName(receiver)
+        if (name && index.options.includes(thisOwner(index, node))) {
+          const tags = refTags(index, name)
           const tag = tags.length === 1 ? tags[0] : undefined
-          const child = tag && await component(index, tag.tag, globals)
+          const child = tag && !tag.inLoop && await component(index, tag.tag, globals)
           const value = child && await inherited(child.index, child.options, node.text)
           return value ? [value] : []
         }
-        if (node.parent.name === node && ts.isPropertyAccessExpression(receiver) &&
-          receiver.name.text === '$refs' && receiver.expression.kind === ts.SyntaxKind.ThisKeyword) {
-          const tags = index.tags.filter(tag => !tag.dynamic &&
-            tag.attributes.some(attribute => attribute.name === 'ref' && attribute.value === node.text))
+        const directName = refAccessName(access)
+        if (directName && node.parent.name === node && index.options.includes(thisOwner(index, node))) {
+          const tags = refTags(index, directName)
           const tag = tags.length === 1 ? tags[0] : undefined
           const attribute = tag?.attributes.find(value => value.name === 'ref')
           return attribute ? [{ fileName: index.fileName, textSpan: { start: attribute.start, length: attribute.end - attribute.start } }] : []
@@ -254,6 +229,13 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
         }
       }
       if (node && ts.isStringLiteral(node) && ts.isElementAccessExpression(node.parent)) {
+        const name = refAccessName(node.parent)
+        if (name && index.options.includes(thisOwner(index, node))) {
+          const tags = refTags(index, name)
+          const tag = tags.length === 1 ? tags[0] : undefined
+          const attribute = tag?.attributes.find(value => value.name === 'ref')
+          return attribute ? [{ fileName: index.fileName, textSpan: { start: attribute.start, length: attribute.end - attribute.start } }] : []
+        }
         const segments = [node.text]
         let access = node.parent.expression
         while (ts.isPropertyAccessExpression(access) ||
@@ -323,7 +305,8 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
             }
           }
         }
-        return globals.members.filter(value => value.name === name).map(value => hit(value.index, value.node))
+        return globals.members.filter(value => value.name === name)
+          .map(value => ({ ...hit(value.index, value.node), sourceKind: 'Vue.prototype' }))
       }
       // Vuex's runtime string protocol is kept separate from identifier renaming.
       if (node && ts.isStringLiteral(node) && ts.isCallExpression(node.parent)) {
@@ -343,7 +326,8 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
     },
     async completions(index, offset) {
       const globals = await registry()
-      const result = globals.members.map(value => ({ name: value.name, kind: 'property', detail: 'Vue.prototype' }))
+      const result = globals.members.map(value => ({ name: value.name, kind: 'property',
+        detail: `Vue.prototype (${path.relative(path.dirname(index.fileName), value.index.fileName).replace(/\\/g, '/')})` }))
       const seen = new Set()
       async function collect(index, options) {
         if (!options || seen.has(options)) {
@@ -389,7 +373,7 @@ function createIndirectService(files, load, resolveModule, revision = () => 0) {
       if (ref) {
         const matches = index.tags.filter(tag => !tag.dynamic &&
           tag.attributes.some(attribute => attribute.name === 'ref' && attribute.value === ref[1]))
-        const child = matches.length === 1 && await component(index, matches[0].tag, globals)
+        const child = matches.length === 1 && !matches[0].inLoop && await component(index, matches[0].tag, globals)
         if (!child) {
           return []
         }

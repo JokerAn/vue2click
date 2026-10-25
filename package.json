@@ -3,7 +3,7 @@
   "displayName": "vueClick",
   "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.17.0",
+  "version": "0.21.0",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
@@ -23,7 +23,10 @@
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:typescript",
-    "onLanguage:typescriptreact"
+    "onLanguage:typescriptreact",
+    "onLanguage:css",
+    "onLanguage:scss",
+    "onLanguage:less"
   ],
   "contributes": {
     "commands": [
@@ -147,6 +150,7 @@
     "test": "node --test test/*.test.js",
     "test:vscode": "node scripts/test-vscode.js",
     "benchmark": "node scripts/benchmark.js",
+    "benchmark:registry": "node scripts/benchmark-registry.js",
     "benchmark:file": "node scripts/benchmark-file.js",
     "build": "node scripts/build.js && node scripts/check-bundle.js && node scripts/check-worker.js",
     "package": "npm run test && npm run build && vsce package --no-dependencies",

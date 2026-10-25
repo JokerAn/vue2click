@@ -70,7 +70,7 @@ assert.deepEqual(registrations.sort(), [
   'DocumentSymbol', 'Hover', 'SignatureHelp', 'Reference', 'Rename',
   'DocumentFormattingEdit', 'Color', 'LinkedEditingRange',
   'DocumentLink', 'DocumentHighlight', 'FoldingRange', 'SelectionRange', 'CodeActions',
-  'close', 'close', 'completion', 'completion', 'definition'
+  'DocumentLink', 'close', 'close', 'close', 'completion', 'completion', 'completion', 'definition', 'definition'
 ].sort())
 for (const subscription of context.subscriptions) {
   subscription.dispose()

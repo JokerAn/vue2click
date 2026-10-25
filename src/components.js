@@ -17,6 +17,16 @@ const initializer = prop => prop && (ts.isShorthandPropertyAssignment(prop) ? pr
 const range = (index, node) => ({ fileName: index.fileName, start: node.getStart(index.root), end: node.end })
 const exported = node => node.modifiers?.some(mod => mod.kind === ts.SyntaxKind.ExportKeyword)
 
+function componentAnchor(index, options) {
+  const name = property(options, 'name')
+  if (name?.name) {
+    return range(index, name.name)
+  }
+  const assignment = index.root.statements.find(statement =>
+    ts.isExportAssignment(statement) && !statement.isExportEquals && statement.expression === options)
+  return range(index, assignment || options)
+}
+
 function topDeclaration(index, name) {
   for (const statement of index.root.statements) {
     if (ts.isVariableStatement(statement)) {
@@ -224,7 +234,8 @@ async function findComponentDefinition(index, offset, context) {
       const node = propDeclaration(component.index, component.options, name)
       return node ? range(component.index, node) : null
     }
-    return component.node ? range(component.index, component.node) : { fileName: component.index.fileName, start: 0, end: 0 }
+    return component.node ? componentAnchor(component.index, component.options) :
+      { fileName: component.index.fileName, start: 0, end: 0 }
   } catch {
     // Missing dependencies, unreadable files and malformed source must not break
     // local definitions or another installed language provider.
