@@ -3,7 +3,7 @@
   "displayName": "vueClick",
   "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.21.1",
+  "version": "0.21.3",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",

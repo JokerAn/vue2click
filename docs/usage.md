@@ -72,7 +72,7 @@ JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位�
 
 ## 独立安装与设置
 
-通过 VS Code 扩展面板的「从 VSIX 安装」选择 `vueClick-0.21.1.vsix`，重新加载窗口后即可使用。仅依赖 VS Code 自带的基础语法，不需要安装 Vetur 或 Vue - Official。若原来安装过其他 Vue 语言扩展，在当前工作区禁用后重新加载窗口，即可独立使用本扩展。
+通过 VS Code 扩展面板的「从 VSIX 安装」选择 `vueClick-0.21.3.vsix`，重新加载窗口后即可使用。仅依赖 VS Code 自带的基础语法，不需要安装 Vetur 或 Vue - Official。若原来安装过其他 Vue 语言扩展，在当前工作区禁用后重新加载窗口，即可独立使用本扩展。
 
 定义跳转、补全、片段和交互式语言服务默认开启。项目诊断默认关闭，避免打开 Vue 文件时自动冷启动整项目分析；需要自动诊断时可按工作区开启：
 
@@ -92,7 +92,7 @@ JSDoc 有独立语法回退：即便关闭项目语言服务，明确可定位�
 
 命令面板的 **VueClick: 查看项目与服务状态** 将当前文件、项目目录、诊断开关、线程状态和排队数显示在 VueClick 输出中，不启动语义线程。**VueClick: 重启语言服务** 释放线程与当前诊断，下次交互再建立服务，不修改文件或配置。线程在队列处理完后空闲五分钟，或所属项目的源码文档全部关闭时释放；重新使用时会有冷启动成本。安装/升级依赖或修改工作区外的元数据后，可用重启命令刷新数据。
 
-扩展入口与语言工作线程均以 CommonJS 打包，使用宿主提供的 `require('vscode')`，没有声明 `"type": "module"`。构建检查会实际加载入口、检查提供者注册，并启动打包后的工作线程验证 Vue 2 类型与随包 TypeScript 标准库。历史宿主验证与当前版本验证记录见 [验证记录](lightweight-validation.md)。
+扩展入口与语言工作线程均以 CommonJS 打包，TypeScript 编译器作为随包共享文件提供，标准类型声明逐文件压缩并在语言工作线程中按需解压缓存。扩展使用宿主提供的 `require('vscode')`，没有声明 `"type": "module"`。构建检查会实际加载入口、检查提供者注册，并启动打包后的工作线程验证 Vue 2、DOM、数组及 Promise 类型。体积与产物检查见 [0.21.3 打包验证](0.21.3-validation.md)，历史宿主验证见 [验证记录](lightweight-validation.md)。
 
 模板语法适配自 Vetur v0.37.3，来源与许可见 [ThirdPartyNotices.txt](../ThirdPartyNotices.txt)。语义能力复用 Vue language-core / Volar / TypeScript；HTML/CSS 使用对应语言服务，没有移植 Vetur 的整套服务器。打包依赖的许可证通知随构建生成于 `dist/ThirdPartyNotices.txt`。
 

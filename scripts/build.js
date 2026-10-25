@@ -3,6 +3,7 @@
 const esbuild = require('esbuild')
 const fs = require('node:fs')
 const path = require('node:path')
+const { brotliCompressSync, constants } = require('node:zlib')
 
 function findPackageManifest(file) {
   let directory
@@ -38,13 +39,23 @@ function bundledPackages(inputs, projectRoot) {
 }
 
 async function main() {
+  fs.rmSync('dist', { recursive: true, force: true })
   const common = {
     bundle: true, platform: 'node', format: 'cjs', target: 'node18', minify: true,
     external: ['vscode'], mainFields: ['module', 'main'], metafile: true
   }
+  const sharedTypeScript = {
+    name: 'shared-typescript',
+    setup(build) {
+      build.onResolve({ filter: /^typescript$/ }, () => ({
+        path: './typescript.cjs', external: true
+      }))
+    }
+  }
   const bundles = await Promise.all([
-    esbuild.build({ ...common, entryPoints: ['src/extension.js'], outfile: 'dist/extension.js' }),
-    esbuild.build({ ...common, entryPoints: ['src/language-worker.js'], outfile: 'dist/language-worker.cjs' })
+    esbuild.build({ ...common, plugins: [sharedTypeScript], entryPoints: ['src/extension.js'], outfile: 'dist/extension.js' }),
+    esbuild.build({ ...common, plugins: [sharedTypeScript], entryPoints: ['src/language-worker.js'], outfile: 'dist/language-worker.cjs' }),
+    esbuild.build({ ...common, entryPoints: [require.resolve('typescript')], outfile: 'dist/typescript.cjs' })
   ])
   const dependencies = bundledPackages(bundles.flatMap(bundle => Object.keys(bundle.metafile.inputs)), process.cwd())
   if (!dependencies.size) throw new Error('Bundled dependency notices must not be empty')
@@ -65,7 +76,12 @@ async function main() {
   const target = path.resolve('dist/typescript')
   fs.mkdirSync(target, { recursive: true })
   for (const file of fs.readdirSync(source)) {
-    if (/^lib.*\.d\.ts$/.test(file) || file === 'LICENSE.txt' || file === 'ThirdPartyNoticeText.txt') {
+    if (/^lib.*\.d\.ts$/.test(file)) {
+      const bytes = brotliCompressSync(fs.readFileSync(path.join(source, file)), {
+        params: { [constants.BROTLI_PARAM_QUALITY]: 9 }
+      })
+      fs.writeFileSync(path.join(target, file + '.br'), bytes)
+    } else if (file === 'LICENSE.txt' || file === 'ThirdPartyNoticeText.txt') {
       fs.copyFileSync(path.join(source, file), path.join(target, file))
     }
   }

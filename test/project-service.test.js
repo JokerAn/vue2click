@@ -5,6 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { brotliCompressSync } = require('node:zlib')
 const { createProjectService } = require('../src/project-service')
 
 function fixture(t, files, entry = 'Parent.vue') {
@@ -25,6 +26,40 @@ function fixture(t, files, entry = 'Parent.vue') {
   service.sync([{ fileName: file, version: 1, text: files[entry] }])
   return { root, file, service }
 }
+
+test('compressed standard libraries follow configured DOM, worker and ESNext references', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-packed-project-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const directory = path.join(root, 'libraries')
+  fs.mkdirSync(directory)
+  const source = path.dirname(require.resolve('typescript'))
+  for (const name of fs.readdirSync(source).filter(name => /^lib.*\.d\.ts$/.test(name))) {
+    fs.writeFileSync(path.join(directory, name + '.br'), brotliCompressSync(fs.readFileSync(path.join(source, name))))
+  }
+  const file = path.join(root, 'example.ts')
+  for (const [lib, text, expected] of [
+    [['es2020', 'dom'], "const value = document.createElement('div')", /HTMLDivElement/],
+    [['es2020', 'webworker'], 'const value = self', /WorkerGlobalScope/],
+    [['esnext', 'dom'], 'const value = Promise.withResolvers<number>()', /PromiseWithResolvers<number>/]
+  ]) {
+    fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: { strict: true, types: [], target: 'es2020', lib },
+      include: ['example.ts']
+    }))
+    fs.writeFileSync(file, text)
+    const service = createProjectService(root, file, directory)
+    try {
+      service.sync([{ fileName: file, version: 1, text }])
+      const diagnostics = await service.run('diagnostics', file, 0)
+      assert.deepEqual(diagnostics.entries, [], JSON.stringify(diagnostics))
+      assert.deepEqual(diagnostics.config, [])
+      const info = await service.run('quickInfo', file, text.indexOf('value'))
+      assert.match(info.text, expected)
+    } finally {
+      service.dispose()
+    }
+  }
+})
 
 test('an inferred non-Git project discovers unopened JS exports and globals while respecting ignores', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-inferred-'))

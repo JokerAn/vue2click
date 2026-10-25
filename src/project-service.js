@@ -11,6 +11,7 @@ const { createModuleResolver } = require('./module-paths')
 const { createIndirectService } = require('./indirect')
 const { createProjectFiles } = require('./project-files')
 const { findNearestConfig, fileStamp } = require('./project-config')
+const { createLibraryReader } = require('./typescript-libraries')
 
 const normalize = file => path.resolve(file).replace(/\\/g, '/')
 const parts = value => ts.displayPartsToString(value || [])
@@ -20,6 +21,7 @@ function createProjectService(root, firstFile, libDirectory) {
   root = normalize(root)
   const buffers = new Map()
   const disk = new Map()
+  const libraries = createLibraryReader(libDirectory, disk)
   let projectVersion = 0
   const config = findNearestConfig(firstFile, root)
   const configRoot = config ? path.dirname(config) : root
@@ -125,6 +127,8 @@ function createProjectService(root, firstFile, libDirectory) {
     if (snapshot) {
       return { version: 'internal', snapshot }
     }
+    const library = libraries.read(file)
+    if (library) return library
     try {
       const stat = fs.statSync(file)
       const version = `${stat.mtimeMs}:${stat.size}`
@@ -151,7 +155,8 @@ function createProjectService(root, firstFile, libDirectory) {
     getScriptKind: file => file.endsWith('.vue') ? ts.ScriptKind.Deferred : ts.getScriptKindFromFileName(file),
     getDefaultLibFileName: settings => libDirectory
       ? path.join(libDirectory, ts.getDefaultLibFileName(settings)) : ts.getDefaultLibFilePath(settings),
-    fileExists: file => staticFiles.has(normalize(file)) || buffers.has(normalize(file)) || ts.sys.fileExists(file),
+    fileExists: file => staticFiles.has(normalize(file)) || buffers.has(normalize(file)) ||
+      libraries.fileExists(file) || ts.sys.fileExists(file),
     readFile: file => {
       const snapshot = read(file)?.snapshot
       return snapshot?.getText(0, snapshot.getLength())
