@@ -6,7 +6,7 @@ const { declarationInfo, documentSymbols, staticHoverInfo } = require('./insight
 const { scriptFolding, scriptSelection, scriptFormatting, scriptHighlights } = require('./script-editing')
 const path = require('node:path')
 const { createResourceResolver, resourceReferences, localReference, urlContext, isSourceFile } = require('./resource-paths')
-const { nativePathFolders, RESOURCE_DIRECTORY_DETAIL } = require('./native-paths')
+const { nativeOwnsDirectory, RESOURCE_DIRECTORY_DETAIL } = require('./native-paths')
 
 function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   const configWatchers = new Map()
@@ -28,7 +28,6 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   })
   context.subscriptions.push({ dispose() { for (const watcher of configWatchers.values()) watcher.dispose(); configWatchers.clear() } })
   const embedded = createEmbeddedService()
-  const nativeDirectoryProbes = new WeakSet()
   require('./tag-closing').registerTagClosing(vscode, context, documentIndex, embedded)
   require('./style-resources').registerStyleResources(vscode, context)
   const selector = [{ language: 'vue', scheme: 'file' }]
@@ -300,15 +299,18 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
           }
           return item
         })
-        // A nested public-provider query must not recursively probe itself.
-        if (document.languageId !== 'vue' && items.some(item => item.kind === vscode.CompletionItemKind.Folder) && !nativeDirectoryProbes.has(document)) {
-          nativeDirectoryProbes.add(document)
-          let folders
-          try { folders = await nativePathFolders(vscode, document, position, token, version, completionContext) }
-          finally { nativeDirectoryProbes.delete(document) }
-          if (folders === null) return undefined
-          for (let i = items.length - 1; i >= 0; i--) {
-            if (items[i].kind === vscode.CompletionItemKind.Folder && folders.has(String(items[i].label).replace(/\/$/, ''))) items.splice(i, 1)
+        // Native mappings have one owner, independent of another request's timing.
+        if (document.languageId !== 'vue' && items.some(item => item.kind === vscode.CompletionItemKind.Folder)) {
+          const nativeDirectories = await nativeOwnsDirectory(vscode, document, completion, token, version)
+          if (nativeDirectories === null) {
+            return undefined
+          }
+          if (nativeDirectories) {
+            for (let i = items.length - 1; i >= 0; i--) {
+              if (items[i].kind === vscode.CompletionItemKind.Folder) {
+                items.splice(i, 1)
+              }
+            }
           }
         }
         if (document.version !== version || token?.isCancellationRequested) return undefined

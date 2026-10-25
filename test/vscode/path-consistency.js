@@ -39,6 +39,23 @@ async function runPathConsistency(directory) {
   assert.ok(!links.some(link => link.target?.fsPath.includes('/views/@src/')), 'aliases must not become relative URL paths')
   assert.equal((await state()).state, 'not-started', 'resource link resolution must not start semantics')
   await vscode.extensions.getExtension('vscode.typescript-language-features')?.activate()
+  // Activation can finish before the built-in JS/TS providers are registered.
+  const readyFile = path.join(root, 'src/views/NativeReady.js')
+  const readyText = 'const ready = { nativeReady: 1 }; ready.'
+  fs.writeFileSync(readyFile, readyText)
+  const readyDocument = await vscode.workspace.openTextDocument(readyFile)
+  await vscode.window.showTextDocument(readyDocument)
+  const deadline = Date.now() + 10000
+  let nativeReady = false
+  while (!nativeReady && Date.now() < deadline) {
+    const list = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider',
+      readyDocument.uri, readyDocument.positionAt(readyText.length))
+    nativeReady = list.items.some(item => item.label === 'nativeReady')
+    if (!nativeReady) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  assert.ok(nativeReady, 'the native JS/TS provider must be ready before testing native-owned paths')
   for (const extension of ['js', 'ts']) {
     const sourceFile = path.join(root, 'src/views/Resources.' + extension)
     fs.writeFileSync(sourceFile, 'import "@src/styles/theme.scss";\nimport "@src/styles/";\nimport "@src/assets/";\nimport "@/assets/";\nimport "@src/assets/icon-"')
@@ -57,7 +74,7 @@ async function runPathConsistency(directory) {
     assert.equal(triggered.items.filter(item => String(item.label).replace(/\/$/, '') === 'nested').length, 1, 'slash-triggered directory completion must not duplicate')
     const hyphenPosition = source.positionAt(source.getText().indexOf('import "@src/assets/icon-"') + 'import "@src/assets/icon-'.length)
     const hyphen = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', source.uri, hyphenPosition, '-')
-    assert.equal(hyphen.items.filter(item => String(item.label).replace(/\/$/, '') === 'icon-set').length, 1, 'extension-only trigger characters must retain resource folders')
+    assert.equal(hyphen.items.filter(item => String(item.label).replace(/\/$/, '') === 'icon-set').length, 1, 'API requests with a hyphen context must keep one directory owner')
     const fallbackPosition = source.positionAt(source.getText().indexOf('import "@/assets/"') + 'import "@/assets/'.length)
     const fallback = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', source.uri, fallbackPosition)
     assert.equal(fallback.items.filter(item => String(item.label).replace(/\/$/, '') === 'nested').length, 1,

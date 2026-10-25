@@ -226,6 +226,7 @@ export default {
   }
   await require('./path-consistency').runPathConsistency(directory)
   await require('./operation-acceptance').runOperationAcceptance(directory)
+  await require('./regressions').runRegressions(directory)
   console.log(`VueClick extension-host checks passed on VS Code ${vscode.version}`)
 }
 

@@ -184,7 +184,7 @@ async function resolveStaticPath(specifier, fromFile, options = {}) {
         const src = path.join(directory, 'src')
         const file = path.resolve(src, specifier.slice(2))
         if (!within(src, file)) return null
-        const hit = await probe(file)
+        const hit = await probe(file, false)
         if (hit) return hit
         // Stop at the nearest project src, even if the requested file is absent.
         try { if ((await fs.stat(src)).isDirectory()) return null } catch (_) {}
@@ -193,7 +193,7 @@ async function resolveStaticPath(specifier, fromFile, options = {}) {
     }
 
     if (options.relativeFallback && !/^[@~]/.test(specifier)) {
-      const hit = await probe(path.resolve(fromDirectory, specifier))
+      const hit = await probe(path.resolve(fromDirectory, specifier), false)
       if (hit) return hit
     }
     if (options.allowPackages === false) return null

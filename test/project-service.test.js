@@ -26,6 +26,34 @@ function fixture(t, files, entry = 'Parent.vue') {
   return { root, file, service }
 }
 
+test('an inferred non-Git project discovers unopened JS exports and globals while respecting ignores', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-inferred-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const text = '<script>export default { methods: { run() { this.$notify(); formatInv } } }</script>'
+  const file = path.join(root, 'Parent.vue')
+  const sources = {
+    'Parent.vue': text,
+    'package.json': '{"name":"inferred-project","private":true}',
+    'plugin.js': "import Vue from 'vue'; Vue.prototype.$notify = function () {}",
+    'utils.js': 'export function formatInvoice() {}',
+    '.gitignore': 'ignored/\n',
+    'ignored/plugin.js': "import Vue from 'vue'; Vue.prototype.$notify = function () {}"
+  }
+  for (const [name, source] of Object.entries(sources)) {
+    fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true })
+    fs.writeFileSync(path.join(root, name), source)
+  }
+  const service = createProjectService(root, file)
+  t.after(() => service.dispose())
+  service.sync([{ fileName: file, version: 1, text }])
+  assert.ok(service.files().includes(path.join(root, 'utils.js')))
+  assert.ok(!service.files().includes(path.join(root, 'ignored/plugin.js')))
+  const globals = await service.run('indirectDefinitions', file, text.indexOf('$notify') + 1)
+  assert.deepEqual(globals.map(entry => entry.fileName), [path.join(root, 'plugin.js')])
+  const completion = await service.run('completion', file, text.indexOf('formatInv') + 'formatInv'.length)
+  assert.ok(completion.entries.some(entry => entry.name === 'formatInvoice'))
+})
+
 test('semantic members use a nearer jsconfig instead of an outer tsconfig', async t => {
   const text = '<script>import { form } from "@src/model"; export default { data() { return { form } }, methods: { run() { this.form. } } }</script>'
   const { root, file, service } = fixture(t, {

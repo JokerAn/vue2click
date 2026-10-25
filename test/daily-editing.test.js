@@ -109,6 +109,29 @@ test('template metadata never participates in comments, literal text or dynamic 
   }
 })
 
+test('quoted comparison operators preserve later prop, event and literal-value completions', () => {
+  const info = {
+    props: [{ name: 'mode', type: 'string', values: [{ value: 'edit', text: "'edit'", string: true }] }],
+    events: [{ name: 'saved', signature: 'saved()' }]
+  }
+  for (const expression of ['count > 0', 'count < 5', 'count >= 0 && count <= 5']) {
+    for (const [suffix, marker, expected] of [
+      ['mode=""', 'mode="', 'edit'],
+      [':mo', ':mo', 'mode'],
+      ['@sa', '@sa', 'saved']
+    ]) {
+      const text = `<template><Child :count="${expression}" ${suffix} /></template>`
+      const offset = text.indexOf(marker) + marker.length
+      const index = buildIndex(text, 'vue', '/app/Parent.vue')
+      const entries = metadataCompletions(index, offset, info)
+      assert.ok(entries.some(entry => entry.name === expected), text)
+      assert.ok(entries.every(entry => entry.replacementSpan.start >= text.indexOf(suffix)))
+    }
+  }
+  const text = '<template><Child :count="count > 0" /> @sa</template>'
+  assert.equal(templateContext(buildIndex(text, 'vue'), text.indexOf('@sa') + 3), null)
+})
+
 test('component import edits handle aliases, registration and script setup without overlapping template edits', async () => {
   const text = `<template><Invoice /></template><script>
   const InvoiceDialog = 1

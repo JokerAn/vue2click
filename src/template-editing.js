@@ -9,14 +9,24 @@ function templateContext(index, offset) {
   if (!block) {
     return null
   }
-  const start = index.text.lastIndexOf('<', offset - 1)
+  const parsedTag = index.tags.find(tag => offset >= tag.start && offset <= tag.end)
+  const start = parsedTag?.start ?? index.text.lastIndexOf('<', offset - 1)
   if (start < block.start) {
     return null
   }
   const before = index.text.slice(start, offset)
-  const parsedTag = index.tags.find(tag => offset >= tag.start && offset <= tag.end)
-  if (parsedTag && parsedTag.start !== start) {
-    return null
+  let quote
+  for (let at = 1; at < before.length; at++) {
+    const character = before[at]
+    if (quote) {
+      if (character === quote) {
+        quote = undefined
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character
+    } else if (character === '>' || character === '<') {
+      return null
+    }
   }
   if (!parsedTag && (index.text.slice(block.start, start).lastIndexOf('<!--') >
     index.text.slice(block.start, start).lastIndexOf('-->') ||
@@ -28,7 +38,7 @@ function templateContext(index, offset) {
     return { kind: 'tag', prefix: before.slice(1), start: start + 1, end: offset + suffix.length }
   }
   const match = /^<([\w-]+)\s/.exec(before)
-  if (!match || before.includes('>') || isHTMLTag(match[1]) || isSVGTag(match[1]) || isMathMLTag(match[1])) {
+  if (!match || isHTMLTag(match[1]) || isSVGTag(match[1]) || isMathMLTag(match[1])) {
     return null
   }
   if (parsedTag?.dynamic) {

@@ -75,6 +75,7 @@ test('directory completion context preserves configured paths and resource-only 
   for (const specifier of ['@src/assets/', '../assets/', '@/assets/', '~/assets/']) {
     const result = await resolver.completePaths(specifier, f.from)
     assert.equal(result.directory, path.join(f.root, 'src/assets'))
+    assert.equal(result.nativeDirectory, ['@src/assets/', '../assets/'].includes(specifier), specifier)
     assert.deepEqual(result.items.map(item => item.name), ['logo.svg', 'nested/'])
   }
   await f.write('jsconfig.json', { compilerOptions: { paths: { '@/*': ['src/*'] } } })

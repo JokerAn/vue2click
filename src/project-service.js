@@ -52,7 +52,8 @@ function createProjectService(root, firstFile, libDirectory) {
     }
   }
   const projectFilesHost = createProjectFiles(configRoot)
-  const parsed = ts.parseJsonConfigFileContent(rawConfig, { ...configHost, readDirectory: projectFilesHost.readDirectory }, configRoot, undefined, config, undefined,
+  const scanConfig = config ? rawConfig : { compilerOptions: { allowJs: true } }
+  const parsed = ts.parseJsonConfigFileContent(scanConfig, { ...configHost, readDirectory: projectFilesHost.readDirectory }, configRoot, undefined, config, undefined,
     [{ extension: '.vue', isMixedContent: true, scriptKind: ts.ScriptKind.Deferred }])
   configErrors.push(...parsed.errors)
   const options = {

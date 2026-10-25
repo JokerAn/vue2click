@@ -39,7 +39,7 @@ function createResourceResolver(options = {}) {
   }
   async function resolveWith(specifier, fromFile, probe) {
     if (cancelled() || !localReference(specifier)) return null
-    const result = await resolveStaticPath(specifier, fromFile, { ...session, probe: async candidate => cancelled() ? null : probe(candidate) })
+    const result = await resolveStaticPath(specifier, fromFile, { ...session, probe: async (...args) => cancelled() ? null : probe(...args) })
     return cancelled() ? null : result
   }
   async function completePaths(specifier, fromFile) {
@@ -47,8 +47,8 @@ function createResourceResolver(options = {}) {
     const slash = specifier.lastIndexOf('/')
     const directoryReference = slash >= 0 ? specifier.slice(0, slash + 1) : './'
     const prefix = specifier.slice(slash + 1)
-    const resolved = await resolveWith(directoryReference, fromFile, async candidate =>
-      (await stat(candidate))?.isDirectory() ? { directory: candidate } : null)
+    const resolved = await resolveWith(directoryReference, fromFile, async (candidate, nativeDirectory = true) =>
+      (await stat(candidate))?.isDirectory() ? { directory: candidate, nativeDirectory } : null)
     if (!resolved || cancelled()) return { items: [] }
     try {
       const entries = await (options.readDirectory || (file => fs.readdir(file, { withFileTypes: true })))(resolved.directory)

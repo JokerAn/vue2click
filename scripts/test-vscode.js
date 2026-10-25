@@ -8,6 +8,8 @@ const { runTests } = require('@vscode/test-electron')
 async function main() {
   const root = path.resolve(__dirname, '..')
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-vscode-'))
+  fs.mkdirSync(path.join(directory, '.vscode'))
+  fs.writeFileSync(path.join(directory, '.vscode/settings.json'), JSON.stringify({ 'files.autoSave': 'off' }))
   try {
     await runTests({
       // Set VSCODE_TEST_VERSION=1.90.0 to check the declared minimum version.

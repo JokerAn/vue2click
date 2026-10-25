@@ -2,71 +2,61 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const { nativeOwnsDirectory } = require('../src/native-paths')
 
 function fixture(options = {}) {
-  const calls = []
   const settings = options.settings || {}
-  const document = { languageId: 'javascript', fileName: '/app/Page.js', version: 1, uri: { scheme: 'file', fsPath: '/app/Page.js' } }
+  const document = { languageId: 'javascript', version: 1, uri: { scheme: 'file', fsPath: '/app/Page.js' } }
+  let activations = 0
+  const extension = { isActive: options.active !== false, async activate() {
+    activations++
+    await options.activate?.(document)
+    this.isActive = true
+  } }
   const vscode = {
-    CompletionItemKind: { Folder: 18, File: 16 },
-    extensions: { getExtension: () => ({ isActive: options.active !== false }) },
+    extensions: { getExtension: () => options.missing ? undefined : extension },
     workspace: { getConfiguration: () => ({ get: (key, fallback) => settings[key] ?? fallback }) },
-    commands: { async executeCommand(...args) {
-      calls.push(args)
-      return options.response ? options.response(document) : { items: [
-        { label: 'nested', kind: 18 }, { label: { label: 'other/' }, kind: 18 }, { label: 'helper', kind: 16 },
-        { label: 'owned/', kind: 18, detail: 'VueClick resource directory' }
-      ] }
-    } }
+    commands: { executeCommand() { assert.fail('directory ownership must not query other completion providers') } }
   }
-  return { vscode, document, calls }
+  return { vscode, document, activations: () => activations }
 }
 
-test('native folder probing uses actual completion entries rather than extension activation as evidence', async () => {
-  const { nativePathFolders } = require('../src/native-paths')
-  const { vscode, document, calls } = fixture()
-  const result = await nativePathFolders(vscode, document, { line: 2, character: 12 })
-  assert.deepEqual([...result], ['nested', 'other'])
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0][0], 'vscode.executeCompletionItemProvider')
-  assert.equal(calls[0][1], document.uri)
-  assert.deepEqual(calls[0][2], { line: 2, character: 12 })
-  assert.equal(calls[0][4], 0, 'native directory probing must not resolve unrelated completion details')
-})
-
-test('inactive or disabled native path suggestions do not start or query a native service', async () => {
-  const { nativePathFolders } = require('../src/native-paths')
-  for (const options of [{ active: false }, { settings: { 'suggest.enabled': false } }, { settings: { 'suggest.paths': false } }]) {
-    const { vscode, document, calls } = fixture(options)
-    assert.deepEqual([...await nativePathFolders(vscode, document, { line: 0, character: 1 })], [])
-    assert.equal(calls.length, 0)
+test('native and extension-only directories have stable owners without nested provider requests', async () => {
+  const { vscode, document } = fixture()
+  for (let index = 0; index < 20; index++) {
+    assert.equal(await nativeOwnsDirectory(vscode, document, { nativeDirectory: true }), true)
+    assert.equal(await nativeOwnsDirectory(vscode, document, { nativeDirectory: false }), false)
   }
 })
 
-test('unavailable native completion results retain the static resource directory fallback', async () => {
-  const { nativePathFolders } = require('../src/native-paths')
-  for (const response of [() => undefined, () => ({ success: false }), () => { throw new Error('command unavailable') }]) {
-    const { vscode, document } = fixture({ response })
-    assert.deepEqual([...await nativePathFolders(vscode, document, { line: 0, character: 1 })], [])
+test('missing or disabled native paths keep extension directory candidates', async () => {
+  for (const options of [{ missing: true }, { settings: { 'suggest.enabled': false } }, { settings: { 'suggest.paths': false } }]) {
+    const { vscode, document, activations } = fixture(options)
+    assert.equal(await nativeOwnsDirectory(vscode, document, { nativeDirectory: true }), false)
+    assert.equal(activations(), 0)
   }
 })
 
-test('native probes preserve the original trigger character instead of impersonating a different editor operation', async () => {
-  const { nativePathFolders } = require('../src/native-paths')
-  const { vscode, document, calls } = fixture()
-  await nativePathFolders(vscode, document, { line: 0, character: 12 }, undefined, document.version, { triggerCharacter: '-' })
-  assert.equal(calls[0][3], '-')
+test('concurrent calls share directory ownership without an in-flight probing guard', async () => {
+  const { vscode, document } = fixture()
+  assert.deepEqual(await Promise.all([0, 1, 2].map(() =>
+    nativeOwnsDirectory(vscode, document, { nativeDirectory: true }))), [true, true, true])
 })
 
-test('cancelled and obsolete native probes must not become resource folder fallback results', async () => {
-  const { nativePathFolders } = require('../src/native-paths')
+test('activation is awaited and failures preserve the directory fallback', async () => {
+  const ready = fixture({ active: false })
+  assert.equal(await nativeOwnsDirectory(ready.vscode, ready.document, { nativeDirectory: true }), true)
+  assert.equal(ready.activations(), 1)
+  const failed = fixture({ active: false, activate() { throw new Error('native service unavailable') } })
+  assert.equal(await nativeOwnsDirectory(failed.vscode, failed.document, { nativeDirectory: true }), false)
+})
+
+test('cancelled and obsolete requests cannot publish directory ownership decisions', async () => {
   const stale = fixture()
   stale.document.version++
-  assert.equal(await nativePathFolders(stale.vscode, stale.document, { line: 0, character: 1 }, undefined, 1), null)
-  assert.equal(stale.calls.length, 0)
-  const changed = fixture({ response(document) { document.version++; return { items: [] } } })
-  assert.equal(await nativePathFolders(changed.vscode, changed.document, { line: 0, character: 1 }), null)
+  assert.equal(await nativeOwnsDirectory(stale.vscode, stale.document, { nativeDirectory: true }, undefined, 1), null)
+  const changed = fixture({ active: false, activate(document) { document.version++ } })
+  assert.equal(await nativeOwnsDirectory(changed.vscode, changed.document, { nativeDirectory: true }), null)
   const cancelled = fixture()
-  assert.equal(await nativePathFolders(cancelled.vscode, cancelled.document, { line: 0, character: 1 }, { isCancellationRequested: true }), null)
-  assert.equal(cancelled.calls.length, 0)
+  assert.equal(await nativeOwnsDirectory(cancelled.vscode, cancelled.document, { nativeDirectory: true }, { isCancellationRequested: true }), null)
 })
