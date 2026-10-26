@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const ts = require('typescript')
 const { buildIndex, findDefinition, sourceText } = require('../src/resolver')
 
 function check(src, needle, target, language = 'javascript', nth = 0) {
@@ -35,6 +36,27 @@ test('Vue 2 methods, data and computed properties resolve at exact source offset
   assert.equal(check(component, '+ globalValue', 'globalValue', 'vue'), 'globalValue')
   assert.equal(findDefinition(buildIndex(component, 'vue'), component.indexOf('{{ value }}') + 3)?.start, component.indexOf('value: 1'))
   assert.equal(sourceText(component, 'vue').length, component.length)
+})
+
+test('Vue and standalone JSX/TSX use their actual script kinds without parse errors', () => {
+  for (const [lang, language, fileName, scriptKind] of [
+    ['jsx', 'vue', '/app/Page.vue', ts.ScriptKind.JSX],
+    ['tsx', 'vue', '/app/Page.vue', ts.ScriptKind.TSX],
+    ['tsx', 'typescript', '/app/Page.tsx', ts.ScriptKind.TSX]
+  ]) {
+    const text = lang === 'tsx' && language !== 'vue' ?
+      'const value = 1; const view = () => <div>{value}</div>' :
+      `<script lang="${lang}">const value = 1; const view = () => <div>{value}</div></script>`
+    const index = buildIndex(text, language, fileName)
+    assert.equal(index.root.scriptKind, scriptKind)
+    assert.deepEqual(index.root.parseDiagnostics.map(entry => entry.messageText), [])
+    assert.ok(findDefinition(index, text.indexOf('{value}') + 2))
+  }
+  for (const extension of ['mts', 'cts']) {
+    const index = buildIndex('const value: number = 1', 'javascript', `/app/file.${extension}`)
+    assert.equal(index.root.scriptKind, ts.ScriptKind.TS)
+    assert.deepEqual(index.root.parseDiagnostics.map(entry => entry.messageText), [])
+  }
 })
 
 test('Vue template events, bindings and interpolations resolve component declarations at exact offsets', () => {

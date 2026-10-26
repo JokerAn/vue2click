@@ -121,7 +121,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
   if (!template || template.props.some(prop => prop.type === NodeTypes.ATTRIBUTE &&
     (prop.name === 'src' || (prop.name === 'lang' && prop.value?.content !== 'html')))) return result
 
-  function add(exp, locals, statements = false, attribute = true) {
+  function add(exp, locals, statements = false, attribute = true, argument = false) {
     if (!exp || exp.isStatic) return
     const raw = exp.loc.source
     let source
@@ -129,7 +129,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     const prefix = statements ? '{' : '('
     const suffix = statements ? '\n}' : '\n)'
     expressions.push({ start: exp.loc.start.offset, end: exp.loc.end.offset,
-      locals: new Set(locals.keys()), localDefinitions: locals, prefix: prefix.length,
+      locals: new Set(locals.keys()), localDefinitions: locals, prefix: prefix.length, argument,
       get source() { return source ||= expressionSource(raw, attribute) },
       get index() {
         const text = prefix + this.source.text + suffix
@@ -249,7 +249,7 @@ function buildTemplateIndex(text, buildExpressionIndex) {
     }
     for (const prop of node.props) {
       if (prop.type !== NodeTypes.DIRECTIVE) continue
-      add(prop.arg, locals)
+      add(prop.arg, locals, false, true, true)
       if (['for', 'slot'].includes(prop.name)) continue
       const event = prop.name === 'on' && Boolean(prop.arg)
       add(prop.exp, event ? new Map([...locals, ['$event', null]]) : locals, event)

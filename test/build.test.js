@@ -52,8 +52,10 @@ test('production bundles share TypeScript and run without development dependenci
   fs.writeFileSync(path.join(root, 'dist/typescript/lib.removed.d.ts'), 'stale library')
 
   function run(script) {
+    // The bundle build compiles TypeScript and compresses declarations; under a
+    // parallel test run it can take well over half a minute on a busy machine.
     const result = spawnSync(process.execPath, [script], {
-      cwd: root, encoding: 'utf8', timeout: 30000
+      cwd: root, encoding: 'utf8', timeout: 120000
     })
     assert.equal(result.error, undefined)
     assert.equal(result.status, 0, result.stdout + result.stderr)

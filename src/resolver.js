@@ -26,8 +26,10 @@ function sourceText(text, language) {
 
 function buildIndex(text, language, fileName = 'untitled.js') {
   const source = sourceText(text, language)
-  const kind = /typescript/.test(language) || (language === 'vue' && /<script\b[^>]*\blang\s*=\s*["'](?:ts|tsx)["']/i.test(text))
-    ? ts.ScriptKind.TS : /react/.test(language) ? ts.ScriptKind.JSX : ts.ScriptKind.JS
+  const vueLanguage = language === 'vue' && text.match(/<script\b[^>]*\blang\s*=\s*["'](jsx|tsx|ts)["']/i)?.[1].toLowerCase()
+  const kind = vueLanguage === 'tsx' || language === 'typescriptreact' || /\.tsx$/i.test(fileName) ? ts.ScriptKind.TSX :
+    vueLanguage === 'jsx' || language === 'javascriptreact' || /\.jsx$/i.test(fileName) ? ts.ScriptKind.JSX :
+      vueLanguage === 'ts' || /typescript/.test(language) || /\.[cm]?ts$/i.test(fileName) ? ts.ScriptKind.TS : ts.ScriptKind.JS
   const root = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, kind)
   const bindings = []
   const options = []
@@ -81,7 +83,9 @@ function buildIndex(text, language, fileName = 'untitled.js') {
   }
   visit(root)
   const template = language === 'vue'
-    ? buildTemplateIndex(text, expression => buildIndex(expression, kind === ts.ScriptKind.TS ? 'typescript' : 'javascript'))
+    ? buildTemplateIndex(text, expression => buildIndex(expression,
+      kind === ts.ScriptKind.TS || kind === ts.ScriptKind.TSX ? 'typescript' :
+        kind === ts.ScriptKind.JSX ? 'javascriptreact' : 'javascript'))
     : { expressions: [], references: [] }
   return { root, text, source, bindings, options, imports, thisAssignments, templates: template.expressions,
     templateReferences: template.references, blocks: template.blocks || [], blockSources: template.blockSources || [], tags: template.tags || [],

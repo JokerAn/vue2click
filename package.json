@@ -3,7 +3,7 @@
   "displayName": "vueClick",
   "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.21.3",
+  "version": "0.22.0",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
@@ -123,7 +123,13 @@
           "type": "boolean",
           "default": false,
           "scope": "resource",
-          "description": "自动显示 Vue 脚本、模板及 CSS/SCSS/Less 诊断；启用后会在活动 Vue 文档打开或编辑后分析项目。"
+          "description": "自动显示 Vue 脚本、模板成员、缺失资源及 CSS/SCSS/Less 诊断；启用后会在活动 Vue 文档打开或编辑后分析项目。"
+        },
+        "vueClick.diagnostics.staticChecks": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "在诊断中包含模板成员与缺失资源检查；关闭后只保留脚本和样式诊断。"
         },
         "vueClick.definition.enabled": {
           "type": "boolean",

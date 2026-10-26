@@ -1,57 +1,67 @@
 # Vue2Click
 
-面向 Vue 2 的 VS Code 扩展，已在 JoyCode 验证。不依赖 Vetur 或 Vue - Official。
+Vue 2 项目的独立编辑支持。**不依赖 Vetur 或 Vue - Official**，装完直接可用，无运行时依赖。
 
-- Vue 文件高亮、定义跳转、成员与组件补全、代码片段。
-- 类型悬停、参数提示、自动导入、查找引用与语义重命名。
-- 组件 props / 事件 / 插槽提示，模板 class 到样式定位。
-- HTML / CSS / SCSS / Less 编辑辅助、资源路径补全与格式化。
+`F12` 跳转 · `Ctrl+Space` 补全 · `Ctrl/Cmd + .` 代码操作 · 输入 `vbase` 生成组件骨架
 
-`F12` 或 Cmd/Ctrl + 点击跳转，`Ctrl+Space` 手动补全，`Ctrl/Cmd + .` 打开代码操作。输入 `vbase` 可生成 Vue 2 组件骨架。
+## 三个差异点
 
-## 关键配置
+- **数字索引直接翻译成业务文案**：`serviceOperateBtn[1]` 悬停显示 `1 → "我要催单"`，动态索引显示完整映射，不用再翻公共常量文件。
+- **改名不会悄悄改坏**：重命名组件成员会同步当前 SFC 模板；改 props 会同步父组件的 `:user-name`，保留 kebab-case 写法。
+- **轻量**：项目语义服务按需启动，普通 `.js` / `.css` 文件不会挂上全仓库监听。
 
-**默认即可使用，无需复制全部配置。** 只在需要调整时写入项目的 `.vscode/settings.json`。
+## 功能
 
-| 配置项 | 默认值 | 功能 |
+| 能力 | 说明 |
+| --- | --- |
+| 跳转与补全 | 模板、脚本、样式之间的定义跳转；成员、组件、props、自动导入补全；`props` / 事件 / 插槽契约提示 |
+| 类型与语义 | 类型悬停、`/** */` 注释、参数提示、查找引用、语义重命名 |
+| 检查 | 模板中未声明的成员、缺失的相对资源、脚本诊断、CSS/SCSS/Less 校验，支持单文件手动检查 |
+| 样式 | 模板 `class` 定位到样式规则；`@import` / `url()` 跳转；HTML/CSS/SCSS/Less 路径补全与格式化 |
+| 编辑 | Vue 文件格式化、标签自动闭合、Vue 2 代码片段 |
+
+## 配置
+
+**默认配置即可使用**，只在需要时写进项目的 `.vscode/settings.json`。
+
+| 配置项 | 默认 | 作用 |
 | --- | --- | --- |
 | `vueClick.definition.enabled` | `true` | 定义跳转 |
 | `vueClick.completion.enabled` | `true` | 补全与自动导入 |
-| `vueClick.snippets.enabled` | `true` | Vue 代码片段 |
-| `vueClick.languageService.enabled` | `true` | 项目语义分析、深层补全、类型提示、引用与重命名 |
-| `vueClick.formatting.enabled` | `true` | 提供 Vue 文件格式化 |
-| `vueClick.autoClosingTags.enabled` | `true` | 自动闭合标签，同时遵循 `html.autoClosingTags` |
-| `vueClick.diagnostics.enabled` | `false` | 自动检查活动 Vue 文件的脚本、模板和样式 |
+| `vueClick.languageService.enabled` | `true` | 项目语义分析（类型、引用、重命名） |
+| `vueClick.formatting.enabled` | `true` | Vue 文件格式化 |
+| `vueClick.diagnostics.enabled` | `false` | 活动文件自动诊断 |
+| `vueClick.diagnostics.staticChecks` | `true` | 诊断中的模板成员与缺失资源检查 |
 
-按需开启以下功能，合并到现有设置中：
+常改的两处：
 
 ```jsonc
 {
-  // 自动检查；大文件可保持默认关闭，使用下方命令手动检查
+  // 开启自动诊断；大项目可保持关闭，改用「检查当前文件」
   "vueClick.diagnostics.enabled": true,
 
-  // 保存时使用 VueClick 格式化 Vue 文件
+  // 让 VueClick 接管 Vue 文件格式化
   "[vue]": {
     "editor.defaultFormatter": "jokeran.vueClick",
     "editor.formatOnSave": true
-  },
-
-  // 使用 Tab 展开 div、ul>li*3 等 Emmet 缩写
-  "emmet.includeLanguages": { "vue": "html" },
-  "emmet.triggerExpansionOnTab": true
+  }
 }
 ```
 
-- 自动诊断需要语言服务保持开启；JS 类型检查还受 `jsconfig.json` / `tsconfig.json` 的 `compilerOptions.checkJs` 控制。
-- 使用 Prettier 等格式器时，沿用其默认格式器，可将 `vueClick.formatting.enabled` 设为 `false`。
-- 自定义路径别名写入 `jsconfig.json` / `tsconfig.json` 的 `compilerOptions.paths`；只读取保存后的配置，不执行 `vue.config.js`。原生映射目录提示需等待内置 JS/TS 服务及项目配置就绪。
+- 用 Prettier 时把 `vueClick.formatting.enabled` 设为 `false`，不冲突。
+- 路径别名写在 `jsconfig.json` / `tsconfig.json` 的 `compilerOptions.paths`，插件不执行 `vue.config.js`。
+- 想用 `Tab` 展开 Emmet：`"emmet.includeLanguages": { "vue": "html" }`。
 
-## 常用命令
+## 命令
 
-在命令面板中搜索：
+- **VueClick: 检查当前文件** — 单次检查，不开启自动诊断
+- **VueClick: 重启语言服务** — 补全或类型信息异常时重置
+- **VueClick: 查看项目与服务状态** — 查看项目目录、诊断开关、线程状态
 
-- **VueClick: 检查当前文件**：单次检查，不开启自动诊断；需保持语言服务开启。
-- **VueClick: 重启语言服务**：补全或类型信息异常时释放服务，下次请求重新启动。
-- **VueClick: 查看项目与服务状态**：查看项目目录、诊断开关与线程状态。
+## 边界
 
-[完整使用说明与边界](docs/usage.md) · [组件契约](docs/component-contracts.md) · [JoyCode 验证记录](docs/0.21.1-validation.md) · [更新日志](CHANGELOG.md) · [第三方声明](ThirdPartyNotices.txt)
+- 专注 Vue 2（Options API 为主），不做 Vue 3 或完整 TS 语言服务。
+- 静态分析只报能确定的问题：遇到 `mixins`、`extends`、`setup`、展开运算符、动态成员时直接跳过，不猜。
+- 重命名 props 时父组件同步有上限（最多 200 个 `.vue`），超出部分不自动改名，宁漏不误。
+
+[完整说明与边界](docs/usage.md) · [组件契约](docs/component-contracts.md) · [更新日志](CHANGELOG.md) · [第三方声明](ThirdPartyNotices.txt)

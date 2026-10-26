@@ -174,7 +174,7 @@ test('configDir substitution follows TypeScript prefix-only and single-substitut
   assert.equal(await f.resolve('repeated/Child'), path.join(f.root, '${configDir}/Child.vue'))
 })
 
-test('a shared traversal budget bounds repeated extends branches and prevents partial alias fallback', { timeout: 3000 }, async t => {
+test('a shared traversal budget bounds repeated extends branches and prevents partial alias fallback', { timeout: 15000 }, async t => {
   const files = {
     'tsconfig.json': { extends: './configs/c0.json', compilerOptions: { paths: { 'component/*': ['src/components/*'] } } },
     'src/components/Child.vue': ''

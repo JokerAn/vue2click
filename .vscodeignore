@@ -13,3 +13,4 @@ package-lock.json
 .agent-teams/**
 .vsce_pat
 .DS_Store
+.workbuddy/**

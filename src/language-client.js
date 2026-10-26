@@ -5,9 +5,33 @@ const path = require('node:path')
 const fs = require('node:fs')
 const { findNearestConfig, ancestors, fileStamp: stamp } = require('./project-config')
 
-function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 5 * 60 * 1000, onConfigFiles } = {}) {
+function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 5 * 60 * 1000, onConfigFiles, onStart } = {}) {
   const projects = new Map()
+  const reportedFailures = new Set()
   let sequence = 0
+  // A crashed worker used to look like "completion silently stopped working".
+  // Report once per project; the manual restart command clears the mark.
+  function reportFailure(root, error) {
+    if (reportedFailures.has(root)) {
+      return
+    }
+    reportedFailures.add(root)
+    const detail = error?.message || String(error)
+    try {
+      const choice = vscode.window?.showWarningMessage?.(`VueClick 语言服务已停止：${detail}`,
+        '重启语言服务', '查看状态')
+      Promise.resolve(choice).then(value => {
+        if (value === '重启语言服务') {
+          return vscode.commands?.executeCommand?.('vueClick.restartLanguageService')
+        }
+        if (value === '查看状态') {
+          return vscode.commands?.executeCommand?.('vueClick.showProjectInfo')
+        }
+      }).catch(() => {})
+    } catch (notificationError) {
+      console.error('[Vue2Click] Language service failure notification failed:', notificationError)
+    }
+  }
   function notifyConfigFiles() {
     onConfigFiles?.([...new Set([...projects.values()].filter(project => !project.disposed)
       .flatMap(project => [...project.configs.keys()]))])
@@ -159,10 +183,18 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
           if (projects.get(root) === current) {
             projects.delete(root)
           }
+          reportFailure(root, error)
         }
         project.worker.on('error', failed)
         project.worker.on('exit', code => failed(new Error(`VueClick language worker exited (${code}).`)))
         projects.set(root, project)
+        try {
+          // Let the host attach the source-change feed only now that a worker
+          // exists to consume it.
+          onStart?.()
+        } catch (error) {
+          console.error('[Vue2Click] Language service start hook failed:', error)
+        }
         notifyConfigFiles()
         while (projects.size > 1) {
           const oldest = projects.keys().next().value
@@ -229,6 +261,7 @@ function createLanguageClient(vscode, context, WorkerClass = Worker, { idleMs = 
       return isCurrent() && !token?.isCancellationRequested ? result : undefined
     },
     invalidate() {
+      reportedFailures.clear()
       for (const project of projects.values()) {
         dispose(project)
       }

@@ -3,14 +3,19 @@
 const { createLanguageClient } = require('./language-client')
 const { createEmbeddedService } = require('./embedded')
 const { declarationInfo, documentSymbols, staticHoverInfo } = require('./insight')
+const { arrayHoverInfo } = require('./array-insight')
+const { templateDiagnostics, templateReferences } = require('./template-diagnostics')
+const { toKebab, isPropOffset, isMemberOffset, propNames, componentBindings, attributeReferences, renamed } = require('./rename-template')
 const { scriptFolding, scriptSelection, scriptFormatting, scriptHighlights } = require('./script-editing')
 const path = require('node:path')
 const { createResourceResolver, resourceReferences, localReference, urlContext, isSourceFile } = require('./resource-paths')
 const { nativeOwnsDirectory, RESOURCE_DIRECTORY_DETAIL } = require('./native-paths')
+const { buildIndex, componentMembers } = require('./resolver')
 
 function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   const configWatchers = new Map()
   const client = createLanguageClient(vscode, context, undefined, {
+    onStart: ensureSourceWatcher,
     onConfigFiles(files) {
       if (!vscode.workspace.createFileSystemWatcher || !vscode.RelativePattern) return
       for (const [file, watcher] of configWatchers) {
@@ -149,6 +154,10 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       }
       const hit = await resolveStatic(document, position, token)
       if (!current() || hit?.stale) return undefined
+      const array = await arrayHoverInfo(index, document.offsetAt(position), hit,
+        (source, offset) => resolveStatic(source, source.positionAt(offset), token))
+      if (!current()) return undefined
+      if (array) return staticResult(array)
       fallback = staticHoverInfo(index, document.offsetAt(position), hit)
       if (fallback?.documentation) return staticResult(fallback)
       const info = await query('quickInfo', document, position, token)
@@ -208,6 +217,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   }, '(', ',')
   register('registerReferenceProvider', selector, {
     async provideReferences(document, position, options, token) {
+      const version = document.version
       const entry = embedded.at(document, documentIndex(document), position)
       if (entry && entry.language !== 'html') {
         return entry.service.findReferences(entry.document, position, entry.parsed)
@@ -215,7 +225,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       }
       const entries = await query('references', document, position, token, { includeDeclaration: options.includeDeclaration })
       const result = await Promise.all((entries || []).map(location))
-      return token?.isCancellationRequested ? [] : result
+      return token?.isCancellationRequested || document.isClosed || document.version !== version ? [] : result
     }
   })
   register('registerRenameProvider', selector, {
@@ -260,6 +270,36 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
           throw new Error('重命名目标已发生变化，请重新执行重命名。')
         }
         result.replace(target.uri, span(target, entry.textSpan), (entry.prefixText || '') + (entry.newName || newName) + (entry.suffixText || ''))
+      }
+      // The script service never sees template expressions, so a member renamed
+      // here would keep its old name in the template and break silently. Only
+      // component members count: a local variable of the same name is a
+      // different symbol and must not touch the template.
+      const index = documentIndex(document)
+      const offset = document.offsetAt(position)
+      const word = document.getWordRangeAtPosition?.(position)
+      const oldName = word ? document.getText(word) : undefined
+      const member = Boolean(oldName) && componentMembers(index).some(entry => entry.name === oldName) &&
+        (isMemberOffset(index, offset) || index.text.slice(Math.max(0, offset - 5), offset) === 'this.')
+      if (member && oldName !== newName && document.version === version) {
+        // The script service already reports same-file template references for
+        // some shapes; overlapping edits make VS Code drop the whole rename.
+        const occupied = (entries || []).filter(entry => entry.fileName === document.fileName)
+          .map(entry => ({ start: entry.textSpan.start, end: entry.textSpan.start + entry.textSpan.length }))
+        for (const value of templateReferences(index, oldName)) {
+          if (occupied.some(range => value.start < range.end && value.end > range.start)) continue
+          result.replace(document.uri,
+            new vscode.Range(document.positionAt(value.start), document.positionAt(value.end)), newName)
+        }
+        if (isPropOffset(index, offset) || propNames(index).has(oldName)) {
+          // Parent documents only; the current file is never re-scanned.
+          for (const edit of await parentPropEdits(document, oldName, newName, token)) {
+            result.replace(edit.uri, edit.range, edit.newText)
+          }
+          if (token?.isCancellationRequested) {
+            return undefined
+          }
+        }
       }
       return token?.isCancellationRequested || document.version !== version ||
         [...targets].some(([target, targetVersion]) => target.version !== targetVersion) ? undefined : result
@@ -636,20 +676,38 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
     vscode.CodeActionKind.Source.append('removeUnusedImports')] })
   async function checkDocument(document, token) {
     const version = document.version
+    const index = documentIndex(document)
     const result = await query('diagnostics', document, 0, token)
-    if (!result || token?.isCancellationRequested || document.version !== version || document.isClosed) {
+    if (token?.isCancellationRequested || document.version !== version || document.isClosed) {
       return
     }
-    const values = result.entries.map(value => {
+    // Template and resource findings are computed statically, so they survive a
+    // disabled or unavailable script service.
+    const staticChecks = vscode.workspace.getConfiguration('vueClick', document.uri)
+      .get('diagnostics.staticChecks', true)
+    const values = (staticChecks ? templateDiagnostics(index) : []).map(value => {
+      const diagnostic = new vscode.Diagnostic(new vscode.Range(document.positionAt(value.start),
+        document.positionAt(value.end)), value.message, vscode.DiagnosticSeverity.Warning)
+      diagnostic.source = 'VueClick template'
+      return diagnostic
+    })
+    const entries = embedded.entries(document, index)
+    for (const value of staticChecks ? await missingResources(document, index, entries, token, version) : []) {
+      const diagnostic = new vscode.Diagnostic(new vscode.Range(document.positionAt(value.start),
+        document.positionAt(value.end)), value.message, vscode.DiagnosticSeverity.Warning)
+      diagnostic.source = 'VueClick resource'
+      values.push(diagnostic)
+    }
+    for (const value of result?.entries || []) {
       const diagnostic = new vscode.Diagnostic(span(document, value), value.message,
         value.category === 1 ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning)
       diagnostic.source = 'VueClick TS'
       diagnostic.code = value.code
-      return diagnostic
-    })
-    for (const entry of embedded.entries(document, documentIndex(document))) {
+      values.push(diagnostic)
+    }
+    for (const entry of entries) {
       if (entry.language === 'html') {
-        const source = languageTemplateDiagnostics(documentIndex(document))
+        const source = languageTemplateDiagnostics(index)
         values.push(...source.map(value => new vscode.Diagnostic(
           new vscode.Range(document.positionAt(value.start), document.positionAt(value.end)),
           value.message, vscode.DiagnosticSeverity.Error)))
@@ -662,8 +720,85 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         values.push(diagnostic)
       }
     }
+    if (token?.isCancellationRequested || document.version !== version || document.isClosed) {
+      return
+    }
     diagnostics.set(document.uri, values)
     return values.length
+  }
+  // Webpack-only aliases are indistinguishable from typos, so only relative
+  // references are checked; package and alias paths stay silent.
+  async function missingResources(document, index, entries, token, version) {
+    const resource = resourceContext(document, token)
+    const result = []
+    let budget = 40
+    for (const reference of resourceReferences(index, entries)) {
+      if (budget-- <= 0 || token?.isCancellationRequested || document.version !== version) break
+      const name = reference.reference.trim()
+      // Only explicit relative files are provable: extensionless specifiers may
+      // resolve through loader or TS extension rules we deliberately do not run.
+      if (reference.closed === false || reference.sourceModule || !localReference(name) ||
+        name.endsWith('/') || !/^(?:\.{1,2}\/|\/)/.test(name) || !path.extname(name)) {
+        continue
+      }
+      if (!await resource.resolve(name, document.fileName)) {
+        result.push({ ...reference, message: `未找到资源文件：${name}` })
+      }
+    }
+    return result
+  }
+  // A prop is the only member a parent template binds by name, so the search is
+  // limited to prop renames and to files that mention both the component and the
+  // attribute. Bounded and cancellable: a rename never walks the whole project.
+  async function parentPropEdits(document, oldName, newName, token) {
+    const base = path.basename(document.fileName).replace(/\.vue$/i, '')
+    const names = [toKebab(oldName), oldName]
+    const sources = new Map()
+    for (const source of vscode.workspace.textDocuments || []) {
+      if (source === document || source.isClosed || source.uri?.scheme !== 'file' || !/\.vue$/i.test(source.fileName)) {
+        continue
+      }
+      sources.set(source.fileName, {
+        uri: source.uri, text: source.getText(), positionAt: offset => source.positionAt(offset)
+      })
+    }
+    if (vscode.workspace.findFiles && vscode.workspace.fs && vscode.Position) {
+      let files = []
+      try {
+        files = await vscode.workspace.findFiles('**/*.vue', '**/node_modules/**', 200)
+      } catch {}
+      for (const uri of files) {
+        if (token?.isCancellationRequested) break
+        if (uri.fsPath === document.fileName || sources.has(uri.fsPath)) continue
+        let text
+        try {
+          text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8')
+        } catch {
+          continue
+        }
+        if (text.length > 512 * 1024) continue
+        sources.set(uri.fsPath, { uri, text, positionAt: offset => positionIn(text, offset) })
+      }
+    }
+    const result = []
+    for (const source of sources.values()) {
+      if (!source.text.includes(base) || !names.some(name => source.text.includes(name))) continue
+      const parent = buildIndex(source.text, 'vue', source.uri.fsPath)
+      const bindings = componentBindings(parent, document.fileName)
+      if (!bindings.size) continue
+      for (const value of attributeReferences(parent, bindings, names)) {
+        const current = source.text.slice(value.start, value.end)
+        result.push({
+          uri: source.uri, newText: renamed(current, oldName, newName),
+          range: new vscode.Range(source.positionAt(value.start), source.positionAt(value.end))
+        })
+      }
+    }
+    return result
+  }
+  function positionIn(text, offset) {
+    const before = text.slice(0, offset)
+    return new vscode.Position(before.split('\n').length - 1, offset - before.lastIndexOf('\n') - 1)
   }
   function schedule(document) {
     const key = document.uri.toString()
@@ -723,8 +858,13 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
   for (const document of vscode.workspace.textDocuments) {
     schedule(document)
   }
-  if (vscode.workspace.createFileSystemWatcher) {
-    const watcher = vscode.workspace.createFileSystemWatcher('**/{*.vue,*.js,*.jsx,*.ts,*.tsx,*.json,.gitignore}')
+  // The workspace-wide change feed only matters once a worker exists to consume
+  // it: before that client.fileChanged() has no listener and a watcher would
+  // cost every repository a recursive file watcher at activation.
+  let sourceWatcher
+  function ensureSourceWatcher() {
+    if (sourceWatcher || !vscode.workspace.createFileSystemWatcher) return
+    const watcher = vscode.workspace.createFileSystemWatcher('**/{*.vue,*.js,*.jsx,*.mjs,*.cjs,*.ts,*.tsx,*.mts,*.cts,*.json,.gitignore}')
     function changed(uri, kind) {
       if (/(?:^|\/)(?:node_modules|\.git)\//.test(uri.fsPath) && !client.isConfigDependency(uri.fsPath)) {
         return
@@ -734,6 +874,7 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
         schedule(document)
       }
     }
+    sourceWatcher = watcher
     context.subscriptions.push(watcher,
       watcher.onDidCreate(uri => changed(uri, 'create')), watcher.onDidDelete(uri => changed(uri, 'delete')),
       watcher.onDidChange(uri => changed(uri, 'change')))
@@ -780,7 +921,8 @@ function registerAdvanced(vscode, context, documentIndex, resolveStatic) {
       if (!entries?.length) {
         entries = await query('definitions', document, position, token)
       }
-      return Promise.all((entries || []).map(location))
+      const result = await Promise.all((entries || []).map(location))
+      return cancelled() ? [] : result
     }
   }
 }

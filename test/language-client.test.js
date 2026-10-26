@@ -212,6 +212,63 @@ test('only tracked config dependencies invalidate the active worker, including e
   assert.equal(FakeWorker.instances.length, 1, 'notifications must not start a replacement worker')
 })
 
+test('the start hook runs once when a worker starts so hosts can attach change feeds lazily', async t => {
+  let starts = 0
+  const { client, document } = lifecycle(t, { onStart: () => { starts++ } })
+  assert.equal(starts, 0, 'registration must not start a worker or its change feed')
+  const request = client.request('quickInfo', document, 0)
+  const worker = FakeWorker.instances[0]
+  assert.equal(starts, 1)
+  worker.emit('message', { id: worker.messages[0].id, result: 'ok' })
+  assert.equal(await request, 'ok')
+  const second = client.request('completion', document, 0)
+  worker.emit('message', { id: worker.messages[1].id, result: [] })
+  await second
+  assert.equal(starts, 1, 'a running worker must not re-run the hook on every request')
+})
+
+test('a crashed worker notifies once per project and offers a restart', async t => {
+  FakeWorker.instances = []
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-language-failure-'))
+  fs.writeFileSync(path.join(root, 'package.json'), '{}')
+  const fileName = path.join(root, 'Page.vue')
+  const document = {
+    fileName, version: 1,
+    uri: { scheme: 'file', fsPath: fileName },
+    getText: () => '<script>export default {}</script>',
+    offsetAt: position => position
+  }
+  const warnings = []
+  const commands = []
+  const vscode = {
+    workspace: { textDocuments: [document], getWorkspaceFolder: () => ({ uri: { fsPath: root } }) },
+    window: {
+      activeTextEditor: { document },
+      showWarningMessage: (...args) => { warnings.push(args); return Promise.resolve('重启语言服务') }
+    },
+    commands: { executeCommand: command => { commands.push(command) } }
+  }
+  const client = createLanguageClient(vscode, { extensionPath: root }, FakeWorker)
+  t.after(() => { client.dispose(); fs.rmSync(root, { recursive: true, force: true }) })
+  const crash = async () => {
+    const request = client.request('quickInfo', document, 0)
+    const rejected = assert.rejects(request, /exited/)
+    FakeWorker.instances[FakeWorker.instances.length - 1].emit('exit', 1)
+    await rejected
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+  await crash()
+  assert.equal(warnings.length, 1, 'a silent exit must become a visible message')
+  assert.match(warnings[0][0], /语言服务已停止/)
+  assert.deepEqual(warnings[0].slice(1), ['重启语言服务', '查看状态'])
+  assert.deepEqual(commands, ['vueClick.restartLanguageService'])
+  await crash()
+  assert.equal(warnings.length, 1, 'a crash loop must not stack notifications for one project')
+  client.invalidate()
+  await crash()
+  assert.equal(warnings.length, 2, 'a manual restart re-arms the notification')
+})
+
 test('saving an inherited config refreshes actual semantic results on the next request', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vueclick-config-refresh-'))
   const base = path.join(root, 'configs/base.json')
