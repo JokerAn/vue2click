@@ -7,8 +7,10 @@ const { createModuleResolver } = require('./module-paths')
 const { completionContext } = require('./completion')
 const { findImportedDefinition } = require('./imports')
 const { registerAdvanced } = require('./advanced')
+const { registerCopyCode } = require('./copy-code')
 
 function activate(context) {
+  registerCopyCode(vscode, context)
   const cache = new Map()
   let cachedCharacters = 0
   const maxCachedDocuments = 32

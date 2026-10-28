@@ -44,6 +44,7 @@ export default { components: { AddressTab }, data() { return { addressParams: {}
   const settings = {}
   let onOpen
   const vscode = {
+    commands: { registerCommand() { return { dispose() {} } } },
     Uri: { file: fileName => ({ fsPath: fileName, toString: () => 'file://' + fileName }) },
     Range: class { constructor(start, end) { this.start = start; this.end = end } },
     Location: class { constructor(uri, range) { this.uri = uri; this.range = range } },

@@ -3,7 +3,7 @@
   "displayName": "vueClick",
   "description": "独立 Vue 2 编辑支持：高亮、跳转、类型补全、悬停、引用与重命名",
   "icon": "icon.png",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "publisher": "jokeran",
   "author": "jokeran",
   "license": "MIT",
@@ -41,8 +41,45 @@
       {
         "command": "vueClick.showProjectInfo",
         "title": "VueClick: 查看项目与服务状态"
+      },
+      {
+        "command": "vueClick.copyCodeWithAbsolutePath",
+        "title": "完全路径",
+        "category": "VueClick: 复制代码和行数",
+        "enablement": "editorHasSelection && resourceScheme == file"
+      },
+      {
+        "command": "vueClick.copyCodeWithRelativePath",
+        "title": "相对路径",
+        "category": "VueClick: 复制代码和行数",
+        "enablement": "editorHasSelection && resourceScheme == file"
       }
     ],
+    "submenus": [
+      {
+        "id": "vueClick.copyCodeWithLineNumber",
+        "label": "复制代码和行数"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "submenu": "vueClick.copyCodeWithLineNumber",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "9_cutcopypaste@4"
+        }
+      ],
+      "vueClick.copyCodeWithLineNumber": [
+        {
+          "command": "vueClick.copyCodeWithAbsolutePath",
+          "group": "1_path@1"
+        },
+        {
+          "command": "vueClick.copyCodeWithRelativePath",
+          "group": "1_path@2"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "vue",
